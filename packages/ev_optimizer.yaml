@@ -110,7 +110,7 @@ template:
         state: >
           {%- set now_ts = now().timestamp() | float -%}
           {%- set min_ahead = now_ts + 300 -%}
-          {%- set sentinel = as_timestamp('2099-01-01 00:00:00') | float -%}
+          {%- set sentinel = as_timestamp('2099-01-01T00:00:00+00:00') | float -%}
           {%- set man_ts = state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) -%}
           {%- set auto_ts = state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) -%}
           {%- if man_ts > min_ahead and man_ts < sentinel -%}
@@ -211,7 +211,7 @@ automation:
           {{ state_attr('input_datetime.ev_deadline', 'timestamp') is not none
              and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) < now().timestamp()
              and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) > 946684800
-             and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) < as_timestamp('2099-01-01 00:00:00') }}
+             and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) < as_timestamp('2099-01-01T00:00:00+00:00') }}
     action:
       - service: zaptec.stop_charging
         data:
@@ -241,7 +241,7 @@ automation:
           {{ state_attr('input_datetime.ev_computed_deadline', 'timestamp') is not none
              and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) < now().timestamp()
              and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) > 946684800
-             and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) < as_timestamp('2099-01-01 00:00:00') }}
+             and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) < as_timestamp('2099-01-01T00:00:00+00:00') }}
     action:
       - service: zaptec.stop_charging
         data:

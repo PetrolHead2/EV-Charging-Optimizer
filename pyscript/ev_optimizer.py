@@ -211,21 +211,25 @@ def auto_set_deadline():
 
 def get_effective_deadline():
     """
-    Returns the deadline timestamp the optimizer should use, as a float
-    (epoch seconds) or None for opportunistic mode.
+    Returns (deadline_ts, source) where deadline_ts is a float UTC epoch seconds
+    (or None for opportunistic mode) and source is "manual", "auto", or
+    "opportunistic".
 
     Priority:
       1. input_datetime.ev_deadline — manual user override — if set and
          more than 5 minutes in the future.
       2. input_datetime.ev_computed_deadline — auto from weekly schedule —
          if set and more than 5 minutes in the future.
-      3. None — opportunistic mode (no deadline).
+      3. (None, "opportunistic") — no deadline.
 
     Both entities are read via their pre-computed 'timestamp' attribute
     (always a correct UTC epoch regardless of DST) rather than parsing the
-    state string (which may be a naive local-time string).
+    state string (which may be a naive local-time string in some HA versions).
+
+    now_ts uses datetime.now(tz=TZ_LOCAL).timestamp() — .timestamp() always
+    returns a POSIX UTC epoch regardless of the tz argument, so this is safe.
     """
-    now_ts    = datetime.now(tz=timezone.utc).timestamp()
+    now_ts    = datetime.now(tz=TZ_LOCAL).timestamp()
     min_ahead = now_ts + 5 * 60   # must be at least 5 minutes away
 
     for ent, label in [
@@ -245,10 +249,10 @@ def get_effective_deadline():
             continue   # far-future sentinel = no departure scheduled
         if ts > min_ahead:
             log.info(f"ev_optimizer: using {label} deadline: {state.get(ent)}")
-            return ts
+            return ts, label
 
     log.debug("ev_optimizer: no valid deadline — opportunistic mode")
-    return None
+    return None, "opportunistic"
 
 
 def compute_schedule(req_kwh, deadline_ts):
@@ -420,8 +424,8 @@ def ev_optimizer_recompute(**kwargs):
 
     # ── Effective deadline ─────────────────────────────────────────────────────
     # Manual ev_deadline takes priority; falls back to auto ev_computed_deadline;
-    # returns None for opportunistic mode.
-    deadline_ts = get_effective_deadline()
+    # returns (None, "opportunistic") for opportunistic mode.
+    deadline_ts, deadline_source = get_effective_deadline()
 
     # ── Compute schedule ───────────────────────────────────────────────────────
     windows, mode, required_slots = compute_schedule(req_kwh, deadline_ts)
@@ -475,7 +479,8 @@ def ev_optimizer_recompute(**kwargs):
     )
 
     log.info(
-        f"ev_optimizer: mode={mode}  need={required_slots} slots ({req_kwh:.2f} kWh)"
+        f"ev_optimizer: mode={mode}  deadline={deadline_source}"
+        f"  need={required_slots} slots ({req_kwh:.2f} kWh)"
         f"  → {len(windows)} window(s) | {total_kwh} kWh | {total_cost:.2f} SEK"
     )
 
