@@ -351,27 +351,50 @@ def compute_schedule(req_kwh, deadline_ts):
 
     all_slots = _build_slots()
 
-    # ── Determine eligible window — epoch timestamps throughout (BUG A fix) ───
-    # Use .timestamp() on both sides to avoid any timezone-naive comparison
-    # ambiguity.  deadline_ts and horizon_ts are already POSIX epoch seconds;
-    # slot datetimes are UTC-aware so .timestamp() is unambiguous.
-    # This eliminates a potential 2 h offset error when CEST (UTC+2) is active.
+    # ── Determine eligible window — epoch timestamps throughout ───────────────
+    # Convert every slot's start/end to POSIX epoch seconds and store as
+    # start_ts / end_ts alongside the original datetime objects.  All
+    # comparisons against now_ts, deadline_ts and horizon_ts use these epoch
+    # fields — never datetime objects — to eliminate any CEST (UTC+2) ambiguity.
     local_tz = ZoneInfo(hass.config.time_zone)
     now_ts   = datetime.now(tz=local_tz).timestamp()
+
+    # Enrich every slot with pre-computed epoch timestamps
+    for s in all_slots:
+        if hasattr(s["start"], "timestamp"):
+            s["start_ts"] = s["start"].timestamp()
+            s["end_ts"]   = s["end"].timestamp()
+        else:
+            s["start_ts"] = float(s["start"])
+            s["end_ts"]   = float(s["end"])
+
+    # Diagnostic: log the comparison anchors so timezone bugs are immediately
+    # visible in the logs.
+    if deadline_ts:
+        log.info(
+            f"compute_schedule: now={datetime.fromtimestamp(now_ts, local_tz).isoformat()}"
+            f"  deadline={datetime.fromtimestamp(deadline_ts, local_tz).isoformat()}"
+            f"  total_slots={len(all_slots)}"
+        )
+    else:
+        log.info(
+            f"compute_schedule: now={datetime.fromtimestamp(now_ts, local_tz).isoformat()}"
+            f"  mode=opportunistic  total_slots={len(all_slots)}"
+        )
 
     if deadline_ts:
         eligible = [
             s for s in all_slots
-            if s["start"].timestamp() >= now_ts
-            and s["end"].timestamp() <= deadline_ts
+            if s["start_ts"] >= now_ts
+            and s["end_ts"]   <= deadline_ts
         ]
         mode = "deadline"
     else:
         horizon_ts = now_ts + 48 * 3600
         eligible   = [
             s for s in all_slots
-            if s["start"].timestamp() >= now_ts
-            and s["end"].timestamp() <= horizon_ts
+            if s["start_ts"] >= now_ts
+            and s["end_ts"]   <= horizon_ts
         ]
         mode = "opportunistic"
 
@@ -381,6 +404,13 @@ def compute_schedule(req_kwh, deadline_ts):
             f"(required={req_kwh:.2f} kWh, deadline={deadline_ts})"
         )
         return [], mode, 0
+
+    # Diagnostic: confirm the actual filtered range
+    log.info(
+        f"compute_schedule: {len(eligible)} candidate slots"
+        f"  first={datetime.fromtimestamp(eligible[0]['start_ts'], local_tz).isoformat()}"
+        f"  last_end={datetime.fromtimestamp(eligible[-1]['end_ts'], local_tz).isoformat()}"
+    )
 
     # Opportunistic: restrict candidate pool to ≤ median price slots
     if mode == "opportunistic":
@@ -491,7 +521,7 @@ def compute_schedule(req_kwh, deadline_ts):
                     gap_range   = list(range(gap_start, gap_end + 1))
                     gap_minutes = len(gap_range) * 15
                     # Only proceed when all gap indices are in the eligible pool
-                    if gap_minutes <= 30 and all(k in by_idx for k in gap_range):
+                    if gap_minutes <= 30 and all([k in by_idx for k in gap_range]):
                         gap_prices = [by_idx[k]["price"] for k in gap_range]
                         gap_avg    = sum(gap_prices) / len(gap_prices)
                         if gap_avg <= sel_avg * 1.5:
