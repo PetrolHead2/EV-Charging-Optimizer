@@ -62,7 +62,7 @@ SLOT_H      = SLOT_MIN / 60.0   # 0.25 h
 TARIFF_HOUR_START    = 6
 TARIFF_HOUR_END      = 22
 MERGE_RATIO          = 0.20    # merge isolated slot if neighbour ≤ 20 % of avg price
-DEADLINE_SENTINEL_YR = 2099    # year used as "no departure" sentinel in ev_computed_deadline
+DEADLINE_SENTINEL_YR = 2030    # reject any deadline from this year onward (implausible / stale sentinel)
 SCHEDULE_DATA_FILE   = "/config/pyscript/ev_schedule_data.json"
 
 # Weekday index → schedule JSON key (Monday=0 … Sunday=6)
@@ -200,6 +200,29 @@ def auto_set_deadline():
         value (or whatever value it currently holds) and the year > 2030 sanity
         check in get_effective_deadline() will reject implausible old values.
     """
+    # ── One-time cleanup: clear any stale far-future sentinel ─────────────────
+    # Old code versions wrote "2099-12-31 23:59:59" to ev_computed_deadline
+    # when no departure was found.  Clear it now on every call so the entity
+    # shows a meaningful state and get_effective_deadline() falls through to
+    # opportunistic mode correctly.
+    local_tz = ZoneInfo(hass.config.time_zone)
+    _attrs   = state.getattr(COMPUTED_DEADLINE_ENT) or {}
+    _ts_raw  = _attrs.get("timestamp")
+    if _ts_raw not in (None, "unknown", "unavailable"):
+        try:
+            _dl_year = datetime.fromtimestamp(float(_ts_raw), tz=local_tz).year
+            if _dl_year > 2030:
+                log.warning(
+                    f"ev_optimizer: auto_set_deadline: clearing stale "
+                    f"far-future ev_computed_deadline (year {_dl_year})"
+                )
+                input_datetime.set_datetime(
+                    entity_id = COMPUTED_DEADLINE_ENT,
+                    datetime  = datetime.now(local_tz).strftime("%Y-%m-%d %H:%M:%S"),
+                )
+        except Exception as _exc:
+            log.warning(f"ev_optimizer: auto_set_deadline: stale deadline cleanup error: {_exc}")
+
     departure = get_next_departure()
 
     if departure is None:
@@ -537,6 +560,45 @@ def compute_schedule(req_kwh, deadline_ts):
                 pos = run_tail + 1
             if not gap_filled:
                 break
+
+    # ── Post-gap-close trim ───────────────────────────────────────────────────
+    # The gap-closing pass may have added 1–2 slots that push total kWh above
+    # the target.  Walk the selected set in chronological order and drop the
+    # most expensive end-slot as long as the remaining slots still deliver
+    # at least req_kwh.  Only end-slots are eligible to avoid splitting windows.
+    if selected:
+        sorted_sel    = sorted(selected)
+        n_pre_trim    = len(sorted_sel)
+        total_kwh_pg  = sum([effective_power_kw(by_idx[i]["start"]) * SLOT_H
+                             for i in sorted_sel])
+
+        while len(sorted_sel) > 1:
+            first_kwh = effective_power_kw(by_idx[sorted_sel[0]]["start"])  * SLOT_H
+            last_kwh  = effective_power_kw(by_idx[sorted_sel[-1]]["start"]) * SLOT_H
+            can_drop_first = (total_kwh_pg - first_kwh) >= req_kwh
+            can_drop_last  = (total_kwh_pg - last_kwh)  >= req_kwh
+
+            if not can_drop_first and not can_drop_last:
+                break
+
+            first_price = by_idx[sorted_sel[0]]["price"]
+            last_price  = by_idx[sorted_sel[-1]]["price"]
+
+            # Drop the droppable end with the higher price
+            if can_drop_first and (not can_drop_last or first_price >= last_price):
+                total_kwh_pg -= first_kwh
+                sorted_sel.pop(0)
+            else:
+                total_kwh_pg -= last_kwh
+                sorted_sel.pop()
+
+        if len(sorted_sel) < n_pre_trim:
+            log.info(
+                f"ev_optimizer: post-gap trim: removed "
+                f"{n_pre_trim - len(sorted_sel)} slot(s) — "
+                f"{total_kwh_pg:.2f} kWh (target {req_kwh:.2f} kWh)"
+            )
+        selected = set(sorted_sel)
 
     # ── Group consecutive slots into contiguous windows ───────────────────────
     windows = merge_into_windows([by_idx[i] for i in selected])

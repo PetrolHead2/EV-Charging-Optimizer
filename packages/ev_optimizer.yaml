@@ -110,7 +110,7 @@ template:
         state: >
           {%- set now_ts = now().timestamp() | float -%}
           {%- set min_ahead = now_ts + 300 -%}
-          {%- set sentinel = as_timestamp('2099-01-01T00:00:00+00:00') | float -%}
+          {%- set sentinel = as_timestamp('2030-01-01T00:00:00+00:00') | float -%}
           {%- set man_ts = state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) -%}
           {%- set auto_ts = state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) -%}
           {%- if man_ts > min_ahead and man_ts < sentinel -%}
@@ -202,8 +202,11 @@ automation:
     alias: "EV safety – manual deadline passed"
     description: >
       Fires once when now() passes a manually-set ev_deadline.
-      Stops charging, updates reason, and resets ev_deadline to a far-future
-      sentinel so this automation does not re-trigger.
+      Stops charging, updates reason, and resets ev_deadline to a clearly-past
+      date (2000-01-01) so this automation does not re-trigger.
+      The trigger's lower bound (> 946684800 = 2000-01-01 UTC) excludes the
+      reset value so the automation cannot fire again until a new future
+      deadline is set.
       The optimizer falls back to ev_computed_deadline or opportunistic mode.
     trigger:
       - platform: template
@@ -211,7 +214,7 @@ automation:
           {{ state_attr('input_datetime.ev_deadline', 'timestamp') is not none
              and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) < now().timestamp()
              and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) > 946684800
-             and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) < as_timestamp('2099-01-01T00:00:00+00:00') }}
+             and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) < as_timestamp('2030-01-01T00:00:00+00:00') }}
     action:
       - service: zaptec.stop_charging
         data:
@@ -225,7 +228,7 @@ automation:
         target:
           entity_id: input_datetime.ev_deadline
         data:
-          datetime: "2099-12-31 23:59:59"
+          datetime: "2000-01-01 00:00:00"
     mode: single
 
   # 3b. Stop when the auto-computed departure deadline has passed
@@ -241,7 +244,7 @@ automation:
           {{ state_attr('input_datetime.ev_computed_deadline', 'timestamp') is not none
              and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) < now().timestamp()
              and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) > 946684800
-             and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) < as_timestamp('2099-01-01T00:00:00+00:00') }}
+             and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) < as_timestamp('2030-01-01T00:00:00+00:00') }}
     action:
       - service: zaptec.stop_charging
         data:
