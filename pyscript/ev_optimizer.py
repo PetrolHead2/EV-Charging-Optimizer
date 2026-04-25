@@ -194,17 +194,16 @@ def auto_set_deadline():
 
     When auto-deadline mode is active (input_boolean.ev_auto_deadline = on):
       - If a departure is found: sets ev_computed_deadline to that datetime.
-      - If no departure found: sets ev_computed_deadline to the 2099-12-31
-        sentinel so get_effective_deadline() uses opportunistic mode.
+      - If no departure found: leaves ev_computed_deadline unchanged and logs.
+        The optimizer falls through to opportunistic mode via get_effective_deadline().
+        No far-future sentinel date is written — the entity retains its last valid
+        value (or whatever value it currently holds) and the year > 2030 sanity
+        check in get_effective_deadline() will reject implausible old values.
     """
     departure = get_next_departure()
 
     if departure is None:
-        input_datetime.set_datetime(
-            entity_id = COMPUTED_DEADLINE_ENT,
-            datetime  = "2099-12-31 23:59:59",
-        )
-        log.info("ev_optimizer: auto deadline: no departure in next 7 days — opportunistic mode")
+        log.info("ev_optimizer: auto deadline: no upcoming departure — opportunistic mode active")
     else:
         dt_str = departure.strftime("%Y-%m-%d %H:%M:%S")
         input_datetime.set_datetime(
@@ -252,6 +251,15 @@ def get_effective_deadline():
         sentinel_ts = datetime(DEADLINE_SENTINEL_YR, 1, 1, tzinfo=timezone.utc).timestamp()
         if ts >= sentinel_ts:
             continue   # far-future sentinel = no departure scheduled
+        # Sanity check: reject any deadline year > 2030 (catches stale sentinel
+        # values that may have been written by older code versions).
+        dl_year = datetime.fromtimestamp(ts, tz=ZoneInfo(hass.config.time_zone)).year
+        if dl_year > 2030:
+            log.warning(
+                f"ev_optimizer: ignoring implausible {label} deadline "
+                f"(year {dl_year}) — treating as opportunistic mode"
+            )
+            continue
         if ts > min_ahead:
             log.info(f"ev_optimizer: using {label} deadline: {state.get(ent)}")
             return ts, label
@@ -457,6 +465,48 @@ def compute_schedule(req_kwh, deadline_ts):
             f"ev_optimizer: trimmed {trimmed} surplus slot(s) after clustering — "
             f"{total_kwh_sel:.2f} kWh scheduled (target {req_kwh:.2f} kWh)"
         )
+
+    # ── Gap-closing pass ───────────────────────────────────────────────────────
+    # If two selected windows are separated by a gap of ≤ 30 min (1–2 slots)
+    # whose average price is ≤ 1.5 × the average price of already-selected
+    # slots, fill the gap.  A short off-period between nearly-identical price
+    # windows provides negligible cost saving while causing two extra start/stop
+    # events.  This pass runs after the trim so that gap-fill slots do not
+    # interfere with the energy-target trim logic above.
+    if selected:
+        sel_avg = sum([by_idx[i]["price"] for i in selected]) / len(selected)
+        for _ in range(20):   # cap iterations to prevent loops on edge-case data
+            gap_filled = False
+            seq = sorted(selected)
+            pos = 0
+            while pos < len(seq):
+                # Advance pos to the end of the current consecutive run
+                run_tail = pos
+                while run_tail + 1 < len(seq) and seq[run_tail + 1] == seq[run_tail] + 1:
+                    run_tail += 1
+                # Check gap to the next run
+                if run_tail + 1 < len(seq):
+                    gap_start   = seq[run_tail] + 1
+                    gap_end     = seq[run_tail + 1] - 1
+                    gap_range   = list(range(gap_start, gap_end + 1))
+                    gap_minutes = len(gap_range) * 15
+                    # Only proceed when all gap indices are in the eligible pool
+                    if gap_minutes <= 30 and all(k in by_idx for k in gap_range):
+                        gap_prices = [by_idx[k]["price"] for k in gap_range]
+                        gap_avg    = sum(gap_prices) / len(gap_prices)
+                        if gap_avg <= sel_avg * 1.5:
+                            for k in gap_range:
+                                selected.add(k)
+                            log.info(
+                                f"ev_optimizer: gap-close: merged {len(gap_range)}-slot "
+                                f"gap at {gap_avg:.4f} SEK/kWh "
+                                f"(threshold {sel_avg * 1.5:.4f} SEK/kWh)"
+                            )
+                            gap_filled = True
+                            break   # restart outer loop — seq is stale
+                pos = run_tail + 1
+            if not gap_filled:
+                break
 
     # ── Group consecutive slots into contiguous windows ───────────────────────
     windows = merge_into_windows([by_idx[i] for i in selected])
@@ -761,6 +811,31 @@ def restore_weekly_schedule(**kwargs):
 
 @time_trigger("startup")
 def _ev_recompute_on_startup(**kwargs):
-    """Recompute schedule on HA startup to restore lost pyscript sensor state."""
+    """Recompute schedule on HA startup to restore lost pyscript sensor state.
+
+    Also clears any stale 2099 sentinel value from ev_computed_deadline that
+    may have been written by older code versions — replaces it with the current
+    time so the entity no longer shows a far-future date in the UI.
+    The year > 2030 check in get_effective_deadline() would already ignore such
+    a value, but clearing it makes the UI state unambiguous.
+    """
+    local_tz = ZoneInfo(hass.config.time_zone)
+    attrs    = state.getattr(COMPUTED_DEADLINE_ENT) or {}
+    ts_raw   = attrs.get("timestamp")
+    if ts_raw not in (None, "unknown", "unavailable"):
+        try:
+            dl_year = datetime.fromtimestamp(float(ts_raw), tz=local_tz).year
+            if dl_year > 2030:
+                log.warning(
+                    f"ev_optimizer: clearing implausible ev_computed_deadline "
+                    f"(year {dl_year}) on startup"
+                )
+                input_datetime.set_datetime(
+                    entity_id = COMPUTED_DEADLINE_ENT,
+                    datetime  = datetime.now(local_tz).strftime("%Y-%m-%d %H:%M:%S"),
+                )
+        except Exception as exc:
+            log.warning(f"ev_optimizer: startup deadline cleanup error: {exc}")
+
     log.info("ev_optimizer: recomputing schedule after startup")
     ev_optimizer_recompute()
