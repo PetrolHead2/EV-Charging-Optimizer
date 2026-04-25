@@ -488,30 +488,55 @@ def ev_optimizer_recompute(**kwargs):
 # ── Automatic triggers ─────────────────────────────────────────────────────────
 
 @state_trigger(
-    "sensor.nordpool_kwh_se3_sek_3_10_025",
+    "input_datetime.ev_deadline",
+    "input_datetime.ev_computed_deadline",
     "input_number.ev_required_kwh",
-    "sensor.ev_remaining_kwh",
-    "input_boolean.ev_tariff_guard_enabled",
     "input_number.ev_max_tariff_power_kw",
+    "input_select.ev_charging_mode",
+    "input_boolean.ev_auto_deadline",
+    "input_boolean.ev_tariff_guard_enabled",
 )
-def _ev_recompute_on_change(**kwargs):
-    """Fire recompute whenever price data, target energy, or tariff settings change."""
+def on_input_changed(var_name=None, value=None, old_value=None, **kwargs):
+    """
+    Recompute whenever any input helper or deadline entity changes.
+
+    Multi-entity @state_trigger is more reliable than separate per-entity
+    triggers for input_datetime — pyscript may miss individual attribute
+    updates when HA refreshes several attributes simultaneously (e.g. when
+    the UI writes a new datetime value the state string AND the 'timestamp'
+    attribute update in the same HA event, and a single-entity trigger may
+    not fire on every such compound update).
+
+    task.sleep(2) ensures HA state (including the 'timestamp' attribute read
+    by get_effective_deadline()) fully settles before the recompute reads it.
+
+    NOTE: pyscript never writes to input_datetime.ev_deadline — that entity
+    belongs to the user. ev_computed_deadline is written only by
+    auto_set_deadline(). Including both here ensures the optimizer responds
+    the moment either changes.
+    """
+    log.info(
+        f"ev_optimizer: {var_name} changed: {old_value} → {value}, recomputing"
+    )
+    task.sleep(2)
     ev_optimizer_recompute()
 
 
-@state_trigger("input_datetime.ev_deadline")
-def on_deadline_changed(**kwargs):
+@state_trigger("sensor.nordpool_kwh_se3_sek_3_10_025")
+def on_price_update(var_name=None, value=None, old_value=None, **kwargs):
     """
-    Dedicated trigger for manual deadline changes.
+    Recompute schedule whenever Nordpool price data updates.
 
-    Uses task.sleep(1) to allow HA state to fully settle before reading the
-    new deadline value. Without the delay, state.getattr(DEADLINE_ENT) may
-    still return the old value in the same event cycle.
-
-    NOTE: pyscript never writes to input_datetime.ev_deadline, so this
-    trigger fires only on genuine user actions (UI, automation, API call).
+    Skips unavailable/unknown transitions — these happen at midnight during
+    the API data gap and would produce an empty schedule. The watchdog and
+    hourly failsafe cover recovery once prices become available again.
     """
-    log.info("ev_optimizer: manual deadline changed, recomputing")
+    if value in ("unavailable", "unknown"):
+        log.debug(
+            f"ev_optimizer: Nordpool price {value} — skipping recompute"
+        )
+        return
+    log.info(f"ev_optimizer: Nordpool updated to {value} SEK/kWh, recomputing")
     task.sleep(1)
     ev_optimizer_recompute()
 
@@ -537,15 +562,6 @@ def persist_weekly_schedule(**kwargs):
         log.warning(f"ev_optimizer: weekly schedule persist failed: {e}")
 
 
-@state_trigger("input_boolean.ev_auto_deadline")
-def _on_auto_deadline_toggle(**kwargs):
-    """When auto deadline is switched on, immediately compute the next departure."""
-    if (state.get(AUTO_DEADLINE_ENT) or "off") == "on":
-        task.sleep(1)
-        auto_set_deadline()
-        ev_optimizer_recompute()
-
-
 @time_trigger("period(now, 5min)")
 def _auto_deadline_tick(**kwargs):
     """
@@ -556,6 +572,8 @@ def _auto_deadline_tick(**kwargs):
     Only runs when input_boolean.ev_auto_deadline is on.
 
     Never touches input_datetime.ev_deadline — that is the user's manual override.
+    Writing ev_computed_deadline from here fires on_input_changed() above, which
+    triggers a full recompute with the updated deadline.
     """
     if (state.get(AUTO_DEADLINE_ENT) or "off") != "on":
         return
@@ -571,6 +589,28 @@ def _auto_deadline_tick(**kwargs):
 def _ev_recompute_hourly(**kwargs):
     """Hourly failsafe — keeps the schedule fresh even without state changes."""
     ev_optimizer_recompute()
+
+
+@time_trigger("period(now, 15min)")
+def schedule_watchdog(**kwargs):
+    """
+    Check every 15 minutes whether the schedule has gone missing.
+
+    sensor.ev_schedule holds its value only in pyscript's in-memory state —
+    it is lost on HA restart and may be empty if all triggers fired before
+    Nordpool data was available. If the schedule is empty but a valid deadline
+    exists, recompute immediately rather than waiting for the hourly failsafe.
+    """
+    sched = state.get(SCHEDULE_ENT)
+    if sched not in (None, "unknown", "unavailable", "[]", ""):
+        return   # schedule is present — nothing to do
+    deadline_ts, source = get_effective_deadline()
+    if deadline_ts is not None:
+        log.warning(
+            f"ev_optimizer: watchdog — schedule empty but {source} deadline "
+            f"exists (ts={deadline_ts:.0f}), forcing recompute"
+        )
+        ev_optimizer_recompute()
 
 
 @time_trigger("startup")
