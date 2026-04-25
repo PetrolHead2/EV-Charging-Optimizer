@@ -283,22 +283,39 @@ def compute_schedule(req_kwh, deadline_ts):
     Anti-toggling: isolated selected slots (no adjacent selected neighbour) are
     merged with their cheapest neighbour if the price difference is within
     MERGE_RATIO × average eligible price.
+    Trim pass: after clustering, surplus slots are removed (most expensive first)
+    until total kWh ≤ req_kwh + one minimum-power slot (avoids over-scheduling).
+    Slot filtering uses epoch .timestamp() comparisons throughout to avoid
+    CEST (UTC+2) offset errors in datetime comparisons.
     """
     if req_kwh <= 0:
         return [], "opportunistic", 0
 
     all_slots = _build_slots()
-    now_utc   = datetime.now(tz=timezone.utc)
 
-    # ── Determine eligible window ──────────────────────────────────────────────
+    # ── Determine eligible window — epoch timestamps throughout (BUG A fix) ───
+    # Use .timestamp() on both sides to avoid any timezone-naive comparison
+    # ambiguity.  deadline_ts and horizon_ts are already POSIX epoch seconds;
+    # slot datetimes are UTC-aware so .timestamp() is unambiguous.
+    # This eliminates a potential 2 h offset error when CEST (UTC+2) is active.
+    local_tz = ZoneInfo(hass.config.time_zone)
+    now_ts   = datetime.now(tz=local_tz).timestamp()
+
     if deadline_ts:
-        dl_dt    = datetime.fromtimestamp(deadline_ts, tz=timezone.utc)
-        eligible = [s for s in all_slots if s["start"] >= now_utc and s["end"] <= dl_dt]
-        mode     = "deadline"
+        eligible = [
+            s for s in all_slots
+            if s["start"].timestamp() >= now_ts
+            and s["end"].timestamp() <= deadline_ts
+        ]
+        mode = "deadline"
     else:
-        horizon  = now_utc + timedelta(hours=48)
-        eligible = [s for s in all_slots if s["start"] >= now_utc and s["end"] <= horizon]
-        mode     = "opportunistic"
+        horizon_ts = now_ts + 48 * 3600
+        eligible   = [
+            s for s in all_slots
+            if s["start"].timestamp() >= now_ts
+            and s["end"].timestamp() <= horizon_ts
+        ]
+        mode = "opportunistic"
 
     if not eligible:
         log.warning(
@@ -357,6 +374,40 @@ def compute_schedule(req_kwh, deadline_ts):
         if not merged:
             break
 
+    # ── Trim surplus slots added by anti-toggling (BUG B fix) ─────────────────
+    # Clustering may expand `selected` beyond what is needed to deliver req_kwh.
+    # Remove the most expensive removable slot in each iteration: a slot is
+    # removable when total_kwh - its_kwh >= req_kwh (energy target still met).
+    # Use the minimum effective slot kWh as the threshold tolerance so we only
+    # stop trimming when we are within one (minimum-power) slot of the target —
+    # conservative, avoids under-trimming on mixed tariff/off-peak selections.
+    slot_kwh_map   = {s["idx"]: effective_power_kw(s["start"]) * SLOT_H
+                      for s in eligible if s["idx"] in selected}
+    total_kwh_sel  = sum(slot_kwh_map.values())
+    min_slot_kwh   = min(slot_kwh_map.values()) if slot_kwh_map else CHARGER_KW * SLOT_H
+    trim_threshold = req_kwh + min_slot_kwh
+    trimmed        = 0
+
+    while total_kwh_sel > trim_threshold:
+        # A slot is removable if dropping it still delivers at least req_kwh
+        removable = [
+            idx for idx in selected
+            if total_kwh_sel - slot_kwh_map[idx] >= req_kwh
+        ]
+        if not removable:
+            break
+        # Remove the costliest removable slot first (minimise wasted spend)
+        worst = max(removable, key=lambda i, d=by_idx: d[i]["price"])
+        selected.discard(worst)
+        total_kwh_sel -= slot_kwh_map.pop(worst)
+        trimmed += 1
+
+    if trimmed:
+        log.info(
+            f"ev_optimizer: trimmed {trimmed} surplus slot(s) after clustering — "
+            f"{total_kwh_sel:.2f} kWh scheduled (target {req_kwh:.2f} kWh)"
+        )
+
     # ── Group consecutive indices into contiguous windows ─────────────────────
     seq     = sorted(selected)
     groups  = []
@@ -368,9 +419,6 @@ def compute_schedule(req_kwh, deadline_ts):
             groups.append(current)
             current = [idx]
     groups.append(current)
-
-    # Read HA timezone dynamically so the output is portable to any installation
-    local_tz = ZoneInfo(hass.config.time_zone)
 
     windows = []
     for grp in groups:
