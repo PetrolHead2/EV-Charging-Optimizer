@@ -154,7 +154,7 @@ def get_next_departure():
 
     local_tz  = ZoneInfo(hass.config.time_zone)
     now_local = datetime.now(tz=local_tz)
-    min_ahead = now_local + timedelta(minutes=15)
+    now_ts    = now_local.timestamp()   # POSIX epoch; compare with .timestamp() to avoid DST ambiguity
 
     for day_offset in range(7):
         target_date = (now_local + timedelta(days=day_offset)).date()
@@ -168,13 +168,18 @@ def get_next_departure():
                 m = int(parts[1])
             except Exception:
                 continue
+            # Always construct with explicit year/month/day from target_date —
+            # never use strptime() without a full date (defaults to 1900/2000).
             candidate = datetime(
-                target_date.year, target_date.month, target_date.day,
-                h, m, 0, tzinfo=local_tz,
+                year=target_date.year, month=target_date.month, day=target_date.day,
+                hour=h, minute=m, second=0, tzinfo=local_tz,
             )
-            if candidate >= min_ahead:
+            # Use epoch comparison (same pattern as BUG A fix) to avoid potential
+            # DST ambiguity when comparing ZoneInfo-aware datetimes directly.
+            if candidate.timestamp() > now_ts + 900:   # at least 15 min ahead
                 return candidate
 
+    log.info("get_next_departure: no departures in next 7 days, switching to opportunistic mode")
     return None
 
 
@@ -253,6 +258,51 @@ def get_effective_deadline():
 
     log.debug("ev_optimizer: no valid deadline — opportunistic mode")
     return None, "opportunistic"
+
+
+def merge_into_windows(slots):
+    """
+    Group a list of slot dicts into contiguous charging windows.
+
+    Slots must share a consistent 'idx' numbering (consecutive idx == adjacent
+    15-min slots).  The list need not be pre-sorted — this function sorts by idx.
+
+    Each input slot dict: {start (UTC datetime), end (UTC datetime), price, idx}
+
+    Returns list of window dicts:
+      {start (ISO str with offset), end (ISO str with offset),
+       price (float, avg), slots (int), kwh (float), cost (float)}
+    """
+    if not slots:
+        return []
+
+    local_tz     = ZoneInfo(hass.config.time_zone)
+    sorted_slots = sorted(slots, key=lambda s: s["idx"])
+
+    groups  = []
+    current = [sorted_slots[0]]
+    for slot in sorted_slots[1:]:
+        if slot["idx"] == current[-1]["idx"] + 1:
+            current.append(slot)
+        else:
+            groups.append(current)
+            current = [slot]
+    groups.append(current)
+
+    windows = []
+    for grp in groups:
+        px_grp   = [s["price"] for s in grp]
+        kwh_grp  = [effective_power_kw(s["start"]) * SLOT_H for s in grp]
+        cost_grp = [px * kwh for px, kwh in zip(px_grp, kwh_grp)]
+        windows.append({
+            "start": grp[0]["start"].astimezone(local_tz).isoformat(),
+            "end":   grp[-1]["end"].astimezone(local_tz).isoformat(),
+            "price": round(sum(px_grp) / len(px_grp), 4),
+            "slots": len(grp),
+            "kwh":   round(sum(kwh_grp), 2),
+            "cost":  round(sum(cost_grp), 4),
+        })
+    return windows
 
 
 def compute_schedule(req_kwh, deadline_ts):
@@ -408,33 +458,47 @@ def compute_schedule(req_kwh, deadline_ts):
             f"{total_kwh_sel:.2f} kWh scheduled (target {req_kwh:.2f} kWh)"
         )
 
-    # ── Group consecutive indices into contiguous windows ─────────────────────
-    seq     = sorted(selected)
-    groups  = []
-    current = [seq[0]]
-    for idx in seq[1:]:
-        if idx == current[-1] + 1:
-            current.append(idx)
-        else:
-            groups.append(current)
-            current = [idx]
-    groups.append(current)
-
-    windows = []
-    for grp in groups:
-        px_grp   = [by_idx[i]["price"] for i in grp]
-        kwh_grp  = [effective_power_kw(by_idx[i]["start"]) * SLOT_H for i in grp]
-        cost_grp = [px * kwh for px, kwh in zip(px_grp, kwh_grp)]
-        windows.append({
-            "start": by_idx[grp[0]]["start"].astimezone(local_tz).isoformat(),
-            "end":   by_idx[grp[-1]]["end"].astimezone(local_tz).isoformat(),
-            "price": round(sum(px_grp) / len(px_grp), 4),
-            "slots": len(grp),
-            "kwh":   round(sum(kwh_grp), 2),
-            "cost":  round(sum(cost_grp), 4),
-        })
+    # ── Group consecutive slots into contiguous windows ───────────────────────
+    windows = merge_into_windows([by_idx[i] for i in selected])
 
     return windows, mode, n
+
+
+def compute_opportunistic_schedule(all_slots):
+    """
+    No deadline — select slots below median price in the next 24 hours.
+
+    No slot-count limit; the intention is to charge whenever electricity is
+    cheap without over-constraining the window.  Returns windows in the same
+    format as compute_schedule() (via merge_into_windows()).
+
+    Called from ev_optimizer_recompute() when get_effective_deadline() returns
+    (None, "opportunistic") — i.e. no valid manual or computed deadline exists.
+    """
+    now_ts  = datetime.now(tz=ZoneInfo(hass.config.time_zone)).timestamp()
+    horizon = now_ts + 86400   # 24 h ahead
+
+    future_slots = [
+        s for s in all_slots
+        if s["start"].timestamp() >= now_ts
+        and s["end"].timestamp() <= horizon
+    ]
+
+    if not future_slots:
+        log.warning("ev_optimizer: opportunistic mode — no future slots found in next 24h")
+        return []
+
+    prices       = [s["price"] for s in future_slots]
+    median_price = sorted(prices)[len(prices) // 2]
+
+    cheap_slots = [s for s in future_slots if s["price"] <= median_price]
+
+    log.info(
+        f"ev_optimizer: opportunistic mode — {len(cheap_slots)} slots at or below "
+        f"median {median_price:.4f} SEK/kWh"
+    )
+
+    return merge_into_windows(cheap_slots)
 
 
 # ── Public service ─────────────────────────────────────────────────────────────
@@ -465,7 +529,6 @@ def ev_optimizer_recompute(**kwargs):
     # ── Required energy ────────────────────────────────────────────────────────
     req_raw = state.get(REQ_KWH_ENT)
     req_kwh = float(req_raw) if req_raw not in (None, "unknown", "unavailable") else 0.0
-
     if req_kwh <= 0:
         rem_raw = state.get(REM_KWH_ENT)
         req_kwh = float(rem_raw) if rem_raw not in (None, "unknown", "unavailable") else 0.0
@@ -474,9 +537,26 @@ def ev_optimizer_recompute(**kwargs):
     # Manual ev_deadline takes priority; falls back to auto ev_computed_deadline;
     # returns (None, "opportunistic") for opportunistic mode.
     deadline_ts, deadline_source = get_effective_deadline()
+    log.info(
+        f"ev_optimizer: deadline_mode={deadline_source}, deadline_ts={deadline_ts}"
+    )
 
     # ── Compute schedule ───────────────────────────────────────────────────────
-    windows, mode, required_slots = compute_schedule(req_kwh, deadline_ts)
+    if req_kwh <= 0:
+        # Nothing to charge — skip scheduling regardless of deadline mode
+        windows        = []
+        mode           = "opportunistic"
+        required_slots = 0
+    elif deadline_ts is None:
+        # Opportunistic mode — no deadline constraint; select cheap slots in next 24 h
+        log.info("ev_optimizer: opportunistic mode — selecting cheapest slots in next 24h")
+        all_slots      = _build_slots()
+        windows        = compute_opportunistic_schedule(all_slots)
+        mode           = "opportunistic"
+        required_slots = 0
+    else:
+        # Deadline mode — select cheapest slots that deliver req_kwh before deadline
+        windows, mode, required_slots = compute_schedule(req_kwh, deadline_ts)
 
     # ── Prune windows that start at or after the deadline ─────────────────────
     # compute_schedule filters slots so that slot.end <= deadline, but when the

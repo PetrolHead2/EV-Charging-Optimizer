@@ -4,26 +4,29 @@
 
 | Item | Value |
 |------|-------|
-| HA host | `[YOUR_HA_HOST]` (SSH user: `pi`, password: `[YOUR_SSH_PASSWORD]`) |
+| HA host | `debian` (SSH user: `pi`, password: `eankod89`) |
 | HA container | `homeassistant` (Docker) |
 | HA version | 2026.4.3 |
-| HA URL | https://[YOUR_HA_HOSTNAME]:8123/ |
+| HA URL | https://koffern.duckdns.org:8123/ |
 | Config dir (host) | `/media/pi/NextCloud/homeassistant` |
 | Config dir (container) | `/config` |
-| Timezone | Europe/Stockholm |
+| Timezone | Europe/Stockholm | Use home assistants time zone instead
 | Nordpool region | SE3, SEK/kWh |
 
-All HA config files are owned by root. Use `echo [YOUR_SSH_PASSWORD] | sudo -S` for writes on debian.
+All HA config files are owned by root. Use `echo eankod89 | sudo -S` for writes on debian.
 
-To restart HA: `ssh pi@[YOUR_HA_HOST] "docker restart homeassistant"`
+To restart HA: `ssh pi@debian "docker restart homeassistant"`
 
 To reload pyscript without restart: call service `pyscript.reload` via HA API or Developer Tools.
 
 To reload input helpers: call `input_datetime/reload`, `input_number/reload`, `input_select/reload`, `input_text/reload` individually — `homeassistant/reload_all` does NOT reload these domains.
 
-Connect to HA at https://[YOUR_HA_HOSTNAME]:8123/ using the long-lived token [HA_TOKEN]
+Connect to HA at https:///koffern.duckdns.org:8123/ using the long-lived token eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI5N2U2MDM3OWY2ZGI0Yjg5OWFhMWIyZWJmYWQ4MGRlYSIsImlhdCI6MTc3NzAyMzk4OSwiZXhwIjoyMDkyMzgzOTg5fQ.jowul0Q2pQq0t27x6CvXPKHbq8ifh1-gfRe8iM9QEOo
 
-the home assistant is a docker installation on the machine "debian" wich is ssh accessable with user "pi" and password "[YOUR_SSH_PASSWORD]" where every a password is needed start with trying "[YOUR_SSH_PASSWORD]"
+the home assistant is a docker installation on the machine "debian" wich is ssh accessable with user "pi" and password "eankod89" where every a password is needed start with trying "eankod89"
+[YOUR_SSH_PASSWORD]=eankod89
+[YOUR_HA_HOST]=debian
+[YOUR_HA_HOSTNAME]=koffern.duckdns.org
 
 ## Project Files
 
@@ -247,6 +250,10 @@ The **safety layer** (automations in `packages/ev_optimizer.yaml`) runs independ
 22. **`sensor.ev_schedule` state uses compact epoch format**: The state string stores windows as `[{"s": start_epoch, "e": end_epoch}, ...]` using compact JSON separators (`separators=(',', ':')`) — approximately 30 chars per window. This replaced the ISO timestamp format (`{"start": "...", "end": "..."}` at ~75 chars/window) which overflowed the 255-char HA state limit at 4+ windows. Full ISO times are still available in `attributes.schedule` for Lovelace display. The control loop (`ev_control_loop.py`) parses windows using `float(window["s"])` and `float(window["e"])` as UTC epoch timestamps.
 
 23. **`compute_schedule()` uses epoch timestamps throughout for slot filtering and trim**: Slot eligibility filtering and the surplus-trim pass both use `.timestamp()` comparisons (`slot["start"].timestamp() >= now_ts`, `slot["end"].timestamp() <= deadline_ts`) rather than datetime object comparisons. This avoids a potential CEST (UTC+2) 2-hour offset error that could include slots beyond the deadline when datetime-aware objects from different construction paths are compared. `now_ts = datetime.now(tz=ZoneInfo(hass.config.time_zone)).timestamp()` — `.timestamp()` always returns a POSIX UTC epoch regardless of the timezone argument, so this is correct and consistent with `get_effective_deadline()`. The trim pass after anti-toggling removes the most expensive surplus slots (those whose removal keeps total kWh ≥ req_kwh) until the schedule is within one minimum-power slot of the target, preventing over-scheduling caused by the clustering heuristic.
+
+24. **`get_next_departure()` always uses explicit date components**: Departure datetimes are constructed as `datetime(year=target_date.year, month=target_date.month, day=target_date.day, hour=h, minute=m, second=0, tzinfo=local_tz)` — never via `datetime.strptime()` without a full date (Python defaults missing date components to 1900 or 2000 depending on version). The 15-minute look-ahead check uses epoch comparison (`candidate.timestamp() > now_ts + 900`) rather than a direct datetime comparison, consistent with the BUG A fix pattern throughout the codebase.
+
+25. **Opportunistic mode selects cheap slots without a completion guarantee**: When `get_effective_deadline()` returns `(None, "opportunistic")` the recompute path calls `compute_opportunistic_schedule()` instead of `compute_schedule()`. Opportunistic mode selects all slots at or below the median price in the next 24 hours — no slot-count limit and no guarantee that a specific kWh target is met. The schedule `mode` attribute will be `"opportunistic"` and `required_slots` will be 0. `compute_schedule()` is only called when a valid deadline exists. To verify opportunistic mode: disable `input_boolean.ev_auto_deadline`, set both deadline entities to the 2099 sentinel, trigger recompute, and check `sensor.ev_schedule` attributes for `"mode": "opportunistic"`.
 
 18. **Schedule grid iframe card** (`/local/ev_schedule_grid.html`): The weekly departure grid is embedded as a `type: iframe` Lovelace card pointing to `/local/ev_schedule_grid.html`. In Docker HA, `/config/www/` maps to `/local/` for browser access. If the card shows blank, check: (a) the file exists at `/media/pi/NextCloud/homeassistant/www/ev_schedule_grid.html` on the host, (b) HA has served it at least once (try opening `https://[YOUR_HA_HOSTNAME]:8123/local/ev_schedule_grid.html` directly), (c) the `HA_TOKEN` constant in the file has been replaced with a valid long-lived access token.
 
