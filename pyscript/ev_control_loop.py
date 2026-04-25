@@ -115,7 +115,7 @@ def should_charge_now(schedule):
     Return True if the current UTC time falls within any window in schedule.
 
     Args:
-        schedule: list of dicts – each with ISO string 'start' and 'end' keys
+        schedule: list of dicts – each with epoch-integer keys 's' (start) and 'e' (end)
 
     Returns:
         bool – True if we are currently inside a scheduled charging window
@@ -123,18 +123,11 @@ def should_charge_now(schedule):
     if not schedule:
         return False
 
-    now_utc = datetime.now(tz=timezone.utc)
+    now_ts = datetime.now(tz=timezone.utc).timestamp()
 
     for window in schedule:
         try:
-            start = datetime.fromisoformat(str(window["start"]))
-            end   = datetime.fromisoformat(str(window["end"]))
-            # Ensure timezone-aware comparison
-            if start.tzinfo is None:
-                start = start.replace(tzinfo=timezone.utc)
-            if end.tzinfo is None:
-                end = end.replace(tzinfo=timezone.utc)
-            if start <= now_utc < end:
+            if now_ts >= float(window["s"]) and now_ts < float(window["e"]):
                 return True
         except Exception as exc:
             log.warning(f"ev_control_loop: cannot parse window {window}: {exc}")

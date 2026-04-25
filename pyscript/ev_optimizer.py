@@ -343,6 +343,13 @@ def ev_optimizer_recompute(**kwargs):
     Registered as: pyscript.ev_optimizer_recompute
     Call manually: Developer Tools → Services → pyscript.ev_optimizer_recompute
     """
+    # ── Entry log ─────────────────────────────────────────────────────────────
+    log.info(
+        f"ev_optimizer: recomputing at {datetime.now(tz=TZ_LOCAL).isoformat()}, "
+        f"deadline={state.get(DEADLINE_ENT)}, "
+        f"remaining={state.get(REM_KWH_ENT) or '?'} kWh"
+    )
+
     # ── Auto deadline: refresh before reading ev_deadline ─────────────────────
     # Ensures the deadline is always current even when called directly (e.g.
     # startup trigger, Nordpool update) without going through the 5-min tick.
@@ -384,19 +391,41 @@ def ev_optimizer_recompute(**kwargs):
     # ── Compute schedule ───────────────────────────────────────────────────────
     windows, mode, required_slots = compute_schedule(req_kwh, deadline_ts)
 
+    # ── Prune windows that start at or after the deadline ─────────────────────
+    # compute_schedule filters slots so that slot.end <= deadline, but when the
+    # deadline moves earlier while a cached schedule is in flight, windows from
+    # the previous computation may be stale. Re-filter here to be safe.
+    if deadline_ts is not None:
+        pre_prune = len(windows)
+        windows = [
+            w for w in windows
+            if datetime.fromisoformat(w["start"]).timestamp() < deadline_ts
+        ]
+        pruned = pre_prune - len(windows)
+        if pruned:
+            log.info(f"ev_optimizer: pruned {pruned} window(s) that exceeded new deadline")
+
     total_kwh  = round(sum([w["kwh"]  for w in windows]), 2)
     total_cost = round(sum([w["cost"] for w in windows]), 2)
     now_iso    = datetime.now(tz=timezone.utc).isoformat()
 
     # ── Publish to sensor.ev_schedule ─────────────────────────────────────────
-    # State string is limited to 255 chars in HA. Store only start/end per
-    # window (sufficient for the control loop). Full window data goes in
+    # State string is limited to 255 chars in HA. Store only epoch-integer
+    # start/end per window using compact keys {"s":..., "e":...}  (~30 chars each
+    # vs ~75 chars for ISO timestamps with offset). Supports ≥ 8 windows safely.
+    # Full window data (ISO times, price, slots, kwh, cost) goes in
     # attributes.schedule for Lovelace display.
-    state_windows = [{"start": w["start"], "end": w["end"]} for w in windows]
+    state_windows = [
+        {
+            "s": int(datetime.fromisoformat(w["start"]).timestamp()),
+            "e": int(datetime.fromisoformat(w["end"]).timestamp()),
+        }
+        for w in windows
+    ]
 
     state.set(
         SCHEDULE_ENT,
-        value          = json.dumps(state_windows, default=str),
+        value          = json.dumps(state_windows, separators=(',', ':')),
         new_attributes = {
             "schedule":       windows,
             "expected_cost":  total_cost,
@@ -420,14 +449,27 @@ def ev_optimizer_recompute(**kwargs):
 
 @state_trigger(
     "sensor.nordpool_kwh_se3_sek_3_10_025",
-    "input_datetime.ev_deadline",
     "input_number.ev_required_kwh",
     "sensor.ev_remaining_kwh",
     "input_boolean.ev_tariff_guard_enabled",
     "input_number.ev_max_tariff_power_kw",
 )
 def _ev_recompute_on_change(**kwargs):
-    """Fire recompute whenever price data, deadline, target energy, or tariff settings change."""
+    """Fire recompute whenever price data, target energy, or tariff settings change."""
+    ev_optimizer_recompute()
+
+
+@state_trigger("input_datetime.ev_deadline")
+def on_deadline_changed(**kwargs):
+    """
+    Dedicated trigger for deadline changes.
+
+    Uses task.sleep(1) to allow HA state to fully settle before reading the
+    new deadline value. Without the delay, state.getattr(DEADLINE_ENT) may
+    still return the old value in the same event cycle.
+    """
+    log.info("ev_optimizer: deadline changed, recomputing")
+    task.sleep(1)
     ev_optimizer_recompute()
 
 
@@ -456,6 +498,7 @@ def persist_weekly_schedule(**kwargs):
 def _on_auto_deadline_toggle(**kwargs):
     """When auto deadline is switched on, immediately compute and apply the next departure."""
     if (state.get(AUTO_DEADLINE_ENT) or "off") == "on":
+        task.sleep(1)
         auto_set_deadline()
         ev_optimizer_recompute()
 
