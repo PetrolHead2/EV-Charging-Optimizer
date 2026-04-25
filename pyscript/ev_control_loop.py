@@ -5,11 +5,20 @@ Runs every 5 minutes to start/stop charging based on the computed schedule.
 Reads : sensor.ev_schedule            (windows computed by ev_optimizer.py)
         input_select.ev_charging_mode  (Smart / Charge now / Stop)
         binary_sensor.ev_deadline_pressure
+        sensor.ev_slots_available / sensor.ev_slots_needed  (for pressure reason)
         input_datetime.ev_last_state_change  (hysteresis tracking)
         sensor.laddbox_charger_mode    (actual charger state)
 Writes: zaptec.resume_charging / zaptec.stop_charging
         input_datetime.ev_last_state_change
         input_text.ev_decision_reason
+
+Priority chain (first match wins):
+  1. Mode="Stop"         → always OFF, no exceptions
+  2. Mode="Charge now"   → always ON,  no exceptions
+  3. Deadline pressure   → always ON,  bypasses hysteresis + consumption guard
+  4. No schedule         → stop only if currently charging, else log + return
+  5. In window           → ON  (subject to hysteresis + consumption guard)
+  6. Outside window      → OFF (subject to hysteresis)
 """
 
 import json
@@ -32,6 +41,8 @@ TIBBER_AVG_W_ENT = "sensor.tibber_pulse_dianavagen_15_average_power"
 GUARD_ENT            = "input_boolean.ev_tariff_guard_enabled"
 MAX_KWH_ENT          = "input_number.ev_max_hourly_kwh"
 MAX_TARIFF_KW_ENT    = "input_number.ev_max_tariff_power_kw"
+SLOTS_AVAIL_ENT      = "sensor.ev_slots_available"
+SLOTS_NEEDED_ENT     = "sensor.ev_slots_needed"
 
 # Zaptec installation ID — used by zaptec.limit_current (installation-level service)
 ZAPTEC_INSTALL_ID  = "dcead66e-4c50-4763-bc17-6ef3efe8be1f"
@@ -216,29 +227,50 @@ def ev_control_loop(**kwargs):
     """
     Main EV charging control loop. Runs every 5 minutes and on pyscript startup.
 
-    Decision tree (evaluated top-to-bottom, first match wins):
+    Priority chain (evaluated top-to-bottom, first match wins — no fall-through):
 
-    1. Mode = "Charge now"   → force ON regardless of schedule or price
-    2. Mode = "Stop"         → force OFF regardless of schedule
-    3. Schedule unavailable  → safe default OFF (fail-closed)
-    4. Schedule present      → ON if current time is inside a window, else OFF
-    5. Deadline pressure     → force ON even if outside window
-    6. Hysteresis guard      → hold current state if < 15 min since last change
-    7. Consumption guard     → block ON if projected hourly kWh exceeds cap
-                               (only 06:00–22:00, only when guard is enabled)
+    1. Mode = "Stop"          → always OFF — no exceptions, no hysteresis
+    2. Mode = "Charge now"    → always ON  — no exceptions, no hysteresis
+    3. Deadline pressure ON   → always ON  — bypasses hysteresis, schedule check,
+                                             and consumption guard
+    4. No schedule available  → stop ONLY if charger is currently charging
+                                (avoid unnecessary toggles when already off)
+    5. Inside scheduled window  → ON  (subject to hysteresis + consumption guard)
+    6. Outside scheduled window → OFF (subject to hysteresis)
     """
-    # ── Step 1 & 2: manual override modes ─────────────────────────────────────
     mode = state.get(MODE_ENT) or "Smart"
 
-    if mode == "Charge now":
-        set_charger(True, "Manual override: Charge now")
-        return
-
+    # ── Step 1: Manual Stop — absolute OFF, no exceptions ─────────────────────
     if mode == "Stop":
         set_charger(False, "Manual override: Stop")
         return
 
-    # ── Step 3: check schedule is available ───────────────────────────────────
+    # ── Step 2: Manual Charge now — absolute ON, no exceptions ────────────────
+    if mode == "Charge now":
+        set_charger(True, "Manual override: Charge now")
+        return
+
+    # ── Step 3: Deadline pressure — force ON, bypass hysteresis ───────────────
+    # ev_deadline_pressure is True when slots_available <= slots_needed + 1,
+    # meaning we cannot afford to wait for the next hysteresis window.
+    # set_charger() only calls resume_charging and updates last_state_change if
+    # the charger is not already ON — no spurious transitions when already charging.
+    pressure = state.get(PRESSURE_ENT) or "off"
+    if pressure == "on":
+        slots_avail  = state.get(SLOTS_AVAIL_ENT)  or "?"
+        slots_needed = state.get(SLOTS_NEEDED_ENT) or "?"
+        reason = (
+            f"Deadline pressure: forced ON "
+            f"({slots_avail} slots available, {slots_needed} needed)"
+        )
+        log.info(
+            f"ev_control_loop: deadline pressure — forcing ON, bypassing hysteresis "
+            f"({slots_avail} slots avail, {slots_needed} needed)"
+        )
+        set_charger(True, reason)
+        return
+
+    # ── Step 4: No schedule — safe default, stop only if currently charging ───
     # sensor.ev_schedule state IS the JSON string; parse it directly.
     # (pyscript state.getattr() returns the full attributes dict — no 2-arg form)
     sched_state = state.get(SCHEDULE_ENT)
@@ -250,28 +282,28 @@ def ev_control_loop(**kwargs):
             schedule = []
 
     if not isinstance(schedule, list) or len(schedule) == 0:
-        set_charger(False, "No schedule available — safe default OFF")
+        if _is_charging():
+            set_charger(False, "No schedule available — stopping unauthorised charge")
+        else:
+            input_text.set_value(
+                entity_id=REASON_ENT,
+                value="No schedule available — charger already off",
+            )
+            log.debug("ev_control_loop: no schedule, charger already off — no action")
         return
 
-    # ── Step 4: evaluate schedule ─────────────────────────────────────────────
-    desired    = should_charge_now(schedule)
-    price_str  = _current_price_str()
+    # ── Steps 5 & 6: Evaluate schedule ────────────────────────────────────────
+    desired   = should_charge_now(schedule)
+    price_str = _current_price_str()
 
     if desired:
         reason = f"In scheduled window ({price_str})"
     else:
         reason = f"Outside scheduled windows ({price_str})"
 
-    # ── Step 5: deadline pressure override ────────────────────────────────────
-    pressure = state.get(PRESSURE_ENT) or "off"
-    if pressure == "on" and not desired:
-        desired = True
-        reason  = f"Deadline pressure: forced ON to meet target ({price_str})"
-        log.info(f"ev_control_loop: deadline pressure active — overriding to ON")
-
-    # ── Step 6: hysteresis guard ───────────────────────────────────────────────
+    # ── Hysteresis guard (steps 5 & 6 only — deadline pressure already returned) ──
     if not check_hysteresis(desired):
-        current_on = _is_charging()
+        current_on  = _is_charging()
         hold_reason = (
             f"Hysteresis: holding {'ON' if current_on else 'OFF'} "
             f"(min {HYSTERESIS_MINUTES} min between state changes, {price_str})"
@@ -280,7 +312,7 @@ def ev_control_loop(**kwargs):
         log.debug(f"ev_control_loop: {hold_reason}")
         return
 
-    # ── Step 7: consumption guard (only relevant when about to start charging) ──
+    # ── Consumption guard (only when schedule says charge, tariff hours only) ──
     if desired:
         local_tz   = ZoneInfo(hass.config.time_zone)
         local_now  = datetime.now(tz=local_tz)
@@ -295,8 +327,8 @@ def ev_control_loop(**kwargs):
             log.debug("ev_control_loop: Consumption guard: outside tariff hours")
 
         else:
-            accum_raw   = state.get(TIBBER_ACCUM_ENT)
-            avg_w_raw   = state.get(TIBBER_AVG_W_ENT)
+            accum_raw = state.get(TIBBER_ACCUM_ENT)
+            avg_w_raw = state.get(TIBBER_AVG_W_ENT)
 
             if accum_raw in (None, "unknown", "unavailable") or \
                avg_w_raw  in (None, "unknown", "unavailable"):
