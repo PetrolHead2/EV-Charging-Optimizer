@@ -12,6 +12,11 @@ Writes: zaptec.resume_charging / zaptec.stop_charging
         input_datetime.ev_last_state_change
         input_text.ev_decision_reason
 
+Triggers:
+  ev_control_loop_tick()       — @time_trigger every 5 min + startup
+  on_zaptec_state_changed()    — @state_trigger sensor.laddbox_charger_mode
+                                  (fires on connect, charging, finished, disconnect)
+
 Priority chain (first match wins):
   1. Mode="Stop"         → always OFF, no exceptions
   2. Mode="Charge now"   → always ON,  no exceptions
@@ -221,11 +226,12 @@ def set_charger(on, reason):
 
 # ── Main control loop ──────────────────────────────────────────────────────────
 
-@time_trigger("period(now, 5min)")
-@time_trigger("startup")
-def ev_control_loop(**kwargs):
+def ev_control_loop():
     """
-    Main EV charging control loop. Runs every 5 minutes and on pyscript startup.
+    Core EV charging decision function.  Plain callable — no trigger decorators.
+
+    Called by ev_control_loop_tick() (5-min schedule + startup) and by
+    on_zaptec_state_changed() (immediately on any charger state transition).
 
     Priority chain (evaluated top-to-bottom, first match wins — no fall-through):
 
@@ -367,22 +373,36 @@ def ev_control_loop(**kwargs):
     set_charger(desired, reason)
 
 
-# ── Charge-start reactive trigger ─────────────────────────────────────────────
+# ── Scheduled tick ────────────────────────────────────────────────────────────
 
-@state_trigger("sensor.laddbox_charger_mode == 'charging'")
-def ev_control_on_charge_start(**kwargs):
+@time_trigger("period(now, 5min)")
+@time_trigger("startup")
+def ev_control_loop_tick(**kwargs):
+    """Run the full control loop on the 5-minute schedule and at startup."""
+    ev_control_loop()
+
+
+# ── Immediate Zaptec state-change trigger ──────────────────────────────────────
+
+@state_trigger("sensor.laddbox_charger_mode")
+def on_zaptec_state_changed(value=None, old_value=None, **kwargs):
     """
-    React immediately when Zaptec transitions to 'charging'.
+    React immediately whenever Zaptec changes state.
 
-    Zaptec may auto-start charging when the car connects, before the next
-    5-minute loop tick. This trigger runs the full decision logic right away
-    so unauthorised charging windows are stopped within seconds rather than
-    up to 5 minutes later.
+    Covers all transitions:
+      disconnected      → car just plugged in (Zaptec may auto-start)
+      connected_finished → charging session ended (e.g. SoC target reached)
+      charging          → Zaptec began charging (auto-start or manual resume)
+      any → disconnected → car unplugged; loop resets decision reason
 
-    Delegates to ev_control_loop() so all logic (mode override, schedule,
-    deadline pressure, hysteresis) is evaluated identically.
+    Runs the full priority-chain decision so we don't wait up to 5 minutes
+    for the time trigger. A 2-second delay lets HA state fully settle before
+    entities are read (mirrors the task.sleep(1) pattern used in ev_optimizer.py
+    for input_datetime triggers).
     """
     log.info(
-        "ev_control_loop: charger transitioned to 'charging' — running immediate check"
+        f"ev_control_loop: Zaptec state changed: {old_value} → {value} — "
+        f"running immediate control loop"
     )
+    task.sleep(2)
     ev_control_loop()
