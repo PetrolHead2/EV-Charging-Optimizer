@@ -1,0 +1,15 @@
+# Never commit real tokens or secrets
+*.env
+.env*
+secrets.yaml
+
+# HA runtime files
+*.pyc
+__pycache__/
+
+# Claude Code settings (local only)
+.claude/
+
+# Keep ev_schedule_data.json structure but note it
+# contains personal schedule data
+# pyscript/ev_schedule_data.json  (commented out — safe to commit)

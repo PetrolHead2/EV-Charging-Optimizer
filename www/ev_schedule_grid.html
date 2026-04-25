@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EV Weekly Schedule</title>
+  <style>
+    /* ── Reset & base ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Roboto', 'Noto', Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      background: #1c1c1c;
+      color: #e1e1e1;
+      padding: 14px 12px 10px;
+      line-height: 1.4;
+    }
+
+    h3 {
+      color: #03a9f4;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    /* ── Grid table ───────────────────────────────────────────────────────── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    thead th {
+      font-size: 11px;
+      font-weight: 500;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 4px 3px 6px;
+      border-bottom: 1px solid #333;
+      text-align: center;
+    }
+    thead th:first-child {
+      text-align: left;
+      width: 38px;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid #2a2a2a;
+      transition: background 0.15s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr.today { background: #1a3a4a; }
+
+    td {
+      padding: 5px 3px;
+      vertical-align: middle;
+    }
+    td:first-child {
+      font-size: 12px;
+      font-weight: 500;
+      color: #aaa;
+      padding-left: 2px;
+      white-space: nowrap;
+    }
+    tr.today td:first-child { color: #03a9f4; }
+
+    /* ── Time inputs ──────────────────────────────────────────────────────── */
+    input[type="time"] {
+      width: 100%;
+      background: #2b2b2b;
+      border: 1px solid #3a3a3a;
+      border-radius: 4px;
+      color: #e1e1e1;
+      font-size: 13px;
+      font-family: inherit;
+      padding: 6px 4px;
+      text-align: center;
+      cursor: pointer;
+      /* hide native spinner arrow on Chrome */
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    input[type="time"]:focus {
+      outline: none;
+      border-color: #03a9f4;
+      background: #242424;
+    }
+    input[type="time"]::-webkit-calendar-picker-indicator {
+      filter: invert(0.45);
+      cursor: pointer;
+      width: 13px;
+      padding: 0;
+    }
+    tr.today input[type="time"] {
+      border-color: #1e4d6b;
+    }
+    tr.today input[type="time"]:focus {
+      border-color: #03a9f4;
+    }
+
+    /* ── Save button ──────────────────────────────────────────────────────── */
+    #save-btn {
+      display: block;
+      width: 100%;
+      margin-top: 12px;
+      padding: 10px 0;
+      background: #03a9f4;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    #save-btn:hover  { background: #0290cf; }
+    #save-btn:active { background: #0277ae; }
+    #save-btn.success { background: #388e3c; }
+    #save-btn.error   { background: #c62828; }
+    #save-btn:disabled { opacity: 0.5; cursor: default; }
+
+    /* ── Status row ───────────────────────────────────────────────────────── */
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 10px;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .status-label {
+      font-size: 11px;
+      color: #777;
+    }
+    .status-value {
+      font-size: 12px;
+      color: #e1e1e1;
+      font-weight: 500;
+    }
+    .mode-badge {
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: 10px;
+      background: #2a2a2a;
+      color: #777;
+      white-space: nowrap;
+    }
+    .mode-badge.auto { background: #0a3a5a; color: #03a9f4; }
+
+    /* ── Auto toggle ──────────────────────────────────────────────────────── */
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-top: 9px;
+    }
+    .toggle-row label {
+      font-size: 12px;
+      color: #999;
+      cursor: pointer;
+      user-select: none;
+    }
+    /* iOS-style pill toggle */
+    .pill-toggle {
+      position: relative;
+      display: inline-block;
+      width: 38px;
+      height: 22px;
+      flex-shrink: 0;
+    }
+    .pill-toggle input { display: none; }
+    .pill-track {
+      position: absolute;
+      inset: 0;
+      background: #444;
+      border-radius: 22px;
+      cursor: pointer;
+      transition: background 0.25s;
+    }
+    .pill-thumb {
+      position: absolute;
+      top: 3px; left: 3px;
+      width: 16px; height: 16px;
+      background: #fff;
+      border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0,0,0,.4);
+      transition: transform 0.25s;
+    }
+    .pill-toggle input:checked ~ .pill-track  { background: #03a9f4; }
+    .pill-toggle input:checked ~ .pill-thumb  { transform: translateX(16px); }
+
+    /* ── Spinner (loading state) ──────────────────────────────────────────── */
+    .loading { opacity: 0.4; pointer-events: none; }
+  </style>
+</head>
+<body>
+
+  <h3>Weekly Departure Schedule</h3>
+
+  <table id="grid">
+    <thead>
+      <tr>
+        <th>Day</th>
+        <th>Dep 1</th>
+        <th>Dep 2</th>
+        <th>Dep 3</th>
+      </tr>
+    </thead>
+    <tbody>
+      <!-- populated by buildGrid() -->
+    </tbody>
+  </table>
+
+  <button id="save-btn" onclick="saveSchedule()">Save</button>
+
+  <div class="status-row">
+    <div>
+      <div class="status-label">Next departure</div>
+      <div class="status-value" id="next-dep">—</div>
+    </div>
+    <div id="mode-badge" class="mode-badge">—</div>
+  </div>
+
+  <div class="toggle-row">
+    <label class="pill-toggle">
+      <input type="checkbox" id="auto-chk" onchange="toggleAuto(this.checked)">
+      <span class="pill-track"></span>
+      <span class="pill-thumb"></span>
+    </label>
+    <label for="auto-chk">Auto deadline from schedule</label>
+  </div>
+
+  <script>
+    // ── Configuration ────────────────────────────────────────────────────────
+    // Replace PASTE_TOKEN_HERE with your HA long-lived access token.
+    // Get one at: Profile → Long-Lived Access Tokens → Create Token
+    const HA_URL   = window.location.origin;   // auto-detected from browser URL
+    const HA_TOKEN = "PASTE_TOKEN_HERE";
+
+    // ── Day metadata ─────────────────────────────────────────────────────────
+    const DAYS = [
+      { key: "mon", label: "Mon" },
+      { key: "tue", label: "Tue" },
+      { key: "wed", label: "Wed" },
+      { key: "thu", label: "Thu" },
+      { key: "fri", label: "Fri" },
+      { key: "sat", label: "Sat" },
+      { key: "sun", label: "Sun" },
+    ];
+    // JS getDay() returns 0=Sun … 6=Sat; map to DAYS index 0=Mon … 6=Sun
+    const JS_TO_IDX = [6, 0, 1, 2, 3, 4, 5];
+
+    // ── Build grid rows ───────────────────────────────────────────────────────
+    function buildGrid() {
+      const todayIdx = JS_TO_IDX[new Date().getDay()];
+      const tbody = document.querySelector("#grid tbody");
+      DAYS.forEach((day, i) => {
+        const tr = document.createElement("tr");
+        if (i === todayIdx) tr.classList.add("today");
+        const slots = [0, 1, 2]
+          .map(s => `<td><input type="time" id="${day.key}-${s}" /></td>`)
+          .join("");
+        tr.innerHTML = `<td>${day.label}</td>${slots}`;
+        tbody.appendChild(tr);
+      });
+    }
+
+    // ── HA API ────────────────────────────────────────────────────────────────
+    const HEADERS = {
+      "Authorization": `Bearer ${HA_TOKEN}`,
+      "Content-Type":  "application/json",
+    };
+
+    async function haGet(path) {
+      const r = await fetch(path, { headers: HEADERS });
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${path}`);
+      return r.json();
+    }
+
+    async function haPost(path, body) {
+      const r = await fetch(path, {
+        method: "POST", headers: HEADERS, body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText} — ${path}`);
+      return r.json();
+    }
+
+    // ── Populate grid from HA ─────────────────────────────────────────────────
+    async function loadSchedule() {
+      try {
+        const d = await haGet("/api/states/input_text.ev_weekly_schedule");
+        const sched = JSON.parse(d.state);
+        DAYS.forEach(({ key }) => {
+          const times = [...(sched[key] || [])].sort();
+          for (let s = 0; s < 3; s++) {
+            document.getElementById(`${key}-${s}`).value = times[s] || "";
+          }
+        });
+      } catch (e) {
+        console.warn("loadSchedule:", e.message);
+      }
+    }
+
+    // ── Status line + auto-toggle state ──────────────────────────────────────
+    async function loadStatus() {
+      try {
+        const d = await haGet("/api/states/input_datetime.ev_deadline");
+        const isSentinel = d.state.startsWith("2099");
+        document.getElementById("next-dep").textContent =
+          isSentinel ? "none — opportunistic mode" : d.state;
+      } catch (e) {
+        document.getElementById("next-dep").textContent = "unavailable";
+      }
+
+      try {
+        const d  = await haGet("/api/states/input_boolean.ev_auto_deadline");
+        const on = d.state === "on";
+        document.getElementById("auto-chk").checked = on;
+        const badge = document.getElementById("mode-badge");
+        badge.textContent = on ? "Auto ✓" : "Manual";
+        badge.className   = "mode-badge" + (on ? " auto" : "");
+      } catch (e) {
+        console.warn("loadStatus (auto):", e.message);
+      }
+    }
+
+    // ── Save schedule ─────────────────────────────────────────────────────────
+    async function saveSchedule() {
+      const sched = {};
+      DAYS.forEach(({ key }) => {
+        const times = [];
+        for (let s = 0; s < 3; s++) {
+          const v = document.getElementById(`${key}-${s}`).value.trim();
+          if (v) times.push(v);
+        }
+        sched[key] = times.sort();
+      });
+
+      const btn = document.getElementById("save-btn");
+      btn.disabled = true;
+
+      try {
+        await haPost("/api/services/input_text/set_value", {
+          entity_id: "input_text.ev_weekly_schedule",
+          value:     JSON.stringify(sched),
+        });
+        btn.textContent = "Saved ✓";
+        btn.className   = "success";
+        setTimeout(() => {
+          btn.textContent = "Save";
+          btn.className   = "";
+          btn.disabled    = false;
+        }, 2000);
+        setTimeout(loadStatus, 3000);
+      } catch (e) {
+        btn.textContent = "Error — check token";
+        btn.className   = "error";
+        console.error("saveSchedule:", e.message);
+        setTimeout(() => {
+          btn.textContent = "Save";
+          btn.className   = "";
+          btn.disabled    = false;
+        }, 3000);
+      }
+    }
+
+    // ── Toggle auto-deadline ──────────────────────────────────────────────────
+    async function toggleAuto(on) {
+      try {
+        await haPost(`/api/services/input_boolean/turn_${on ? "on" : "off"}`, {
+          entity_id: "input_boolean.ev_auto_deadline",
+        });
+        const badge = document.getElementById("mode-badge");
+        badge.textContent = on ? "Auto ✓" : "Manual";
+        badge.className   = "mode-badge" + (on ? " auto" : "");
+        setTimeout(loadStatus, 1500);
+      } catch (e) {
+        console.error("toggleAuto:", e.message);
+      }
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────────
+    buildGrid();
+    loadSchedule();
+    loadStatus();
+    setInterval(loadStatus, 60_000);   // refresh status every 60 s
+  </script>
+</body>
+</html>

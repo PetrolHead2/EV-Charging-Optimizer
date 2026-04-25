@@ -1,0 +1,239 @@
+# EV Charging Optimizer - Template Sensors + Safety Automations
+# Part of the EV Charging Optimizer package.
+# Entity reference:
+#   CHARGER_POWER_W : sensor.laddbox_charge_power          (W)
+#   CHARGER_SESSION : sensor.laddbox_session_total_charge  (kWh)
+#   CAR_SOC         : sensor.jbb78w_state_of_charge        (%)
+#   DEADLINE        : input_datetime.ev_deadline
+#   REQUIRED_KWH    : input_number.ev_required_kwh
+
+input_number:
+  ev_max_hourly_kwh:
+    name: "EV max consumption per hour"
+    min: 1
+    max: 20
+    step: 0.5
+    initial: 5.0
+    unit_of_measurement: kWh
+    icon: mdi:gauge
+  ev_max_tariff_power_kw:
+    name: "EV max charge power during tariff hours"
+    min: 0
+    max: 11
+    step: 0.5
+    initial: 3.0
+    unit_of_measurement: kW
+    icon: mdi:current-ac
+
+input_boolean:
+  ev_tariff_guard_enabled:
+    name: "EV power tariff guard"
+    initial: true
+    icon: mdi:shield-bolt
+  ev_auto_deadline:
+    name: "EV auto deadline from weekly schedule"
+    initial: true
+    icon: mdi:calendar-sync
+
+input_text:
+  ev_weekly_schedule:
+    name: "EV weekly departure schedule"
+    max: 255
+    icon: mdi:calendar-clock
+    # No initial: value — schedule is persisted to and restored from
+    # /config/pyscript/ev_schedule_data.json by ev_optimizer.py on startup.
+
+template:
+  - sensor:
+      - name: "ev_charging_power_kw"
+        unique_id: "ev_charging_power_kw"
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        icon: mdi:lightning-bolt
+        state: >
+          {%- set power_w = states('sensor.laddbox_charge_power') | float(0) -%}
+          {%- if power_w > 0 -%}
+            {{ (power_w / 1000) | round(3) }}
+          {%- else -%}
+            7
+          {%- endif -%}
+
+      - name: "ev_remaining_kwh"
+        unique_id: "ev_remaining_kwh"
+        unit_of_measurement: "kWh"
+        icon: mdi:battery-charging-medium
+        state: >
+          {%- set required = states('input_number.ev_required_kwh') | float(-1) -%}
+          {%- if required <= 0 -%}
+            {%- set soc = states('sensor.jbb78w_state_of_charge') | float(50) -%}
+            {{ ([0, ((100 - soc) / 100 * 10)] | max) | round(2) }}
+          {%- else -%}
+            {%- set delivered = states('sensor.laddbox_session_total_charge') | float(0) -%}
+            {{ ([0, required - delivered] | max) | round(2) }}
+          {%- endif -%}
+
+      - name: "ev_slots_needed"
+        unique_id: "ev_slots_needed"
+        unit_of_measurement: "slots"
+        icon: mdi:timer-sand
+        state: >
+          {%- set remaining = states('sensor.ev_remaining_kwh') | float(0) -%}
+          {%- if remaining <= 0 -%}
+            0
+          {%- else -%}
+            {%- set hour = now().hour -%}
+            {%- set guard = is_state('input_boolean.ev_tariff_guard_enabled', 'on') -%}
+            {%- set tariff = (hour >= 6 and hour < 22) and guard -%}
+            {%- set power = states('input_number.ev_max_tariff_power_kw') | float(3.0)
+               if tariff else
+               states('sensor.ev_charging_power_kw') | float(7.0) -%}
+            {%- if power > 0 -%}
+              {{ (remaining / power / 0.25) | round(0, 'ceil') | int }}
+            {%- else -%}
+              0
+            {%- endif -%}
+          {%- endif -%}
+
+      - name: "ev_slots_available"
+        unique_id: "ev_slots_available"
+        unit_of_measurement: "slots"
+        icon: mdi:clock-time-four-outline
+        state: >
+          {%- set ts = state_attr('input_datetime.ev_deadline', 'timestamp') -%}
+          {%- if ts is none -%}
+            999
+          {%- else -%}
+            {%- set now_ts = now().timestamp() | float -%}
+            {{ ([0, ((ts | float - now_ts) / 900) | int] | max) }}
+          {%- endif -%}
+
+    binary_sensor:
+      - name: "ev_deadline_pressure"
+        unique_id: "ev_deadline_pressure"
+        device_class: problem
+        icon: mdi:alert-circle-outline
+        state: >
+          {%- set deadline = states('input_datetime.ev_deadline') -%}
+          {%- if deadline in ['unknown', 'unavailable', 'none', ''] -%}
+            false
+          {%- else -%}
+            {%- set available = states('sensor.ev_slots_available') | int(999) -%}
+            {%- set needed = states('sensor.ev_slots_needed') | int(0) -%}
+            {{ available <= (needed + 1) }}
+          {%- endif -%}
+
+# ── Safety Automations ─────────────────────────────────────────────────────────
+# These run independently of the pyscript control loop as a hard-stop backstop.
+# They do NOT conflict with existing automations (different triggers/conditions).
+
+automation:
+  # 1. Stop when the required energy target is reached
+  - id: ev_safety_target_reached
+    alias: "EV safety – target energy reached"
+    description: >
+      Hard-stops the charger when ev_remaining_kwh drops below 0.2 kWh,
+      meaning the requested charge target has been fulfilled.
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.ev_remaining_kwh
+        below: 0.2
+    condition:
+      # Only act when the charger is actually running
+      - condition: state
+        entity_id: sensor.laddbox_charger_mode
+        state: "charging"
+    action:
+      - service: zaptec.stop_charging
+        data:
+          charger_id: d0775df2-6290-4569-bcd0-b579f8b9dde3
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.ev_decision_reason
+        data:
+          value: "Safety stop: target energy reached"
+      - service: input_select.select_option
+        target:
+          entity_id: input_select.ev_charging_mode
+        data:
+          option: "Stop"
+    mode: single
+
+  # 2. Stop when the Mercedes SoC reaches 95 %
+  - id: ev_safety_soc_reached
+    alias: "EV safety – SoC target reached"
+    description: >
+      Hard-stops the charger when the car battery reaches 95 % SoC
+      while the car reports it is actively charging.
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.jbb78w_state_of_charge
+        above: 95
+    condition:
+      # Only fire when the car itself reports active charging
+      - condition: state
+        entity_id: binary_sensor.jbb78w_charging_active
+        state: "on"
+    action:
+      - service: zaptec.stop_charging
+        data:
+          charger_id: d0775df2-6290-4569-bcd0-b579f8b9dde3
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.ev_decision_reason
+        data:
+          value: "Safety stop: SoC 95% target reached"
+    mode: single
+
+  # 3. Stop and reset when the departure deadline has passed
+  - id: ev_safety_deadline_passed
+    alias: "EV safety – deadline passed"
+    description: >
+      Fires once when now() passes the set departure deadline.
+      Stops charging, updates reason, and resets the deadline to a far-future
+      sentinel (2099-12-31) so this automation does not re-trigger.
+      The optimizer will continue in opportunistic mode until a new deadline is set.
+    trigger:
+      - platform: template
+        value_template: >
+          {{ state_attr('input_datetime.ev_deadline', 'timestamp') is not none
+             and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) < now().timestamp()
+             and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) > 946684800 }}
+    action:
+      - service: zaptec.stop_charging
+        data:
+          charger_id: d0775df2-6290-4569-bcd0-b579f8b9dde3
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.ev_decision_reason
+        data:
+          value: "Safety stop: departure deadline passed"
+      # Reset deadline to far future so the template trigger evaluates False
+      # and does not re-fire. Set a new deadline for the next trip.
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ev_deadline
+        data:
+          datetime: "2099-12-31 23:59:59"
+    mode: single
+
+  # 4. Stop when Nordpool price data becomes unavailable
+  - id: ev_safety_no_price_data
+    alias: "EV safety – Nordpool unavailable"
+    description: >
+      Hard-stops the charger if the Nordpool price sensor goes unavailable.
+      Charging without price data means the schedule cannot be trusted.
+    trigger:
+      - platform: state
+        entity_id: sensor.nordpool_kwh_se3_sek_3_10_025
+        to: "unavailable"
+    action:
+      - service: zaptec.stop_charging
+        data:
+          charger_id: d0775df2-6290-4569-bcd0-b579f8b9dde3
+      - service: input_text.set_value
+        target:
+          entity_id: input_text.ev_decision_reason
+        data:
+          value: "Safety stop: Nordpool price data unavailable"
+    mode: single
