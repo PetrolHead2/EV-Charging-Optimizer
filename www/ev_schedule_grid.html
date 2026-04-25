@@ -308,13 +308,36 @@
 
     // ── Status line + auto-toggle state ──────────────────────────────────────
     async function loadStatus() {
+      const SENTINEL_PREFIX = "2099";
+      const MIN_AHEAD_MS    = 5 * 60 * 1000;   // 5 minutes
+
+      function isFutureDeadline(stateStr) {
+        if (!stateStr || stateStr.startsWith(SENTINEL_PREFIX)) return false;
+        // state string is "YYYY-MM-DD HH:MM:SS" local time
+        const ts = new Date(stateStr.replace(" ", "T")).getTime();
+        return ts > Date.now() + MIN_AHEAD_MS;
+      }
+
       try {
-        const d = await haGet("/api/states/input_datetime.ev_deadline");
-        const isSentinel = d.state.startsWith("2099");
-        document.getElementById("next-dep").textContent =
-          isSentinel ? "none — opportunistic mode" : d.state;
+        const [manualData, autoData] = await Promise.all([
+          haGet("/api/states/input_datetime.ev_deadline"),
+          haGet("/api/states/input_datetime.ev_computed_deadline"),
+        ]);
+
+        const manualState = manualData.state;
+        const autoState   = autoData.state;
+        const depEl       = document.getElementById("next-dep");
+
+        if (isFutureDeadline(manualState)) {
+          depEl.textContent = manualState + " (manual)";
+        } else if (isFutureDeadline(autoState)) {
+          depEl.textContent = autoState + " (auto)";
+        } else {
+          depEl.textContent = "none — opportunistic mode";
+        }
       } catch (e) {
         document.getElementById("next-dep").textContent = "unavailable";
+        console.warn("loadStatus (deadline):", e.message);
       }
 
       try {

@@ -20,11 +20,18 @@ Effective charging power is time-aware:
 The optimizer accounts for this when selecting slots, calculating how many
 are needed, and reporting expected_cost and total_kwh.
 
+Deadline arbitration — two distinct entities:
+  input_datetime.ev_deadline          — human input only; never written by pyscript
+  input_datetime.ev_computed_deadline — written only by pyscript (auto_set_deadline);
+                                        never shown as an editable field in the UI
+  get_effective_deadline() arbitrates: manual deadline takes priority if it is in
+  the future; otherwise falls back to the computed deadline; else opportunistic mode.
+
 Auto-deadline mode (input_boolean.ev_auto_deadline = on):
-  Reads input_text.ev_weekly_schedule JSON every 5 minutes and advances
-  input_datetime.ev_deadline to the next upcoming departure time.
+  Reads input_text.ev_weekly_schedule JSON every 5 minutes and writes the next
+  upcoming departure to input_datetime.ev_computed_deadline.
   Empty days trigger opportunistic mode (no deadline).
-  When off: input_datetime.ev_deadline is fully manual.
+  When off: ev_computed_deadline is not updated; ev_deadline is fully manual.
 """
 
 import json
@@ -33,16 +40,17 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 # ── Entity IDs ─────────────────────────────────────────────────────────────────
-PRICE_ENT         = "sensor.nordpool_kwh_se3_sek_3_10_025"
-REQ_KWH_ENT       = "input_number.ev_required_kwh"
-REM_KWH_ENT       = "sensor.ev_remaining_kwh"
-DEADLINE_ENT      = "input_datetime.ev_deadline"
-SCHEDULE_ENT      = "sensor.ev_schedule"
-GUARD_ENT         = "input_boolean.ev_tariff_guard_enabled"
-MAX_TARIFF_KW_ENT = "input_number.ev_max_tariff_power_kw"
-CHARGE_PWR_ENT    = "sensor.ev_charging_power_kw"
-WEEKLY_SCHED_ENT  = "input_text.ev_weekly_schedule"
-AUTO_DEADLINE_ENT = "input_boolean.ev_auto_deadline"
+PRICE_ENT              = "sensor.nordpool_kwh_se3_sek_3_10_025"
+REQ_KWH_ENT            = "input_number.ev_required_kwh"
+REM_KWH_ENT            = "sensor.ev_remaining_kwh"
+DEADLINE_ENT           = "input_datetime.ev_deadline"           # human input only
+COMPUTED_DEADLINE_ENT  = "input_datetime.ev_computed_deadline"  # pyscript only
+SCHEDULE_ENT           = "sensor.ev_schedule"
+GUARD_ENT              = "input_boolean.ev_tariff_guard_enabled"
+MAX_TARIFF_KW_ENT      = "input_number.ev_max_tariff_power_kw"
+CHARGE_PWR_ENT         = "sensor.ev_charging_power_kw"
+WEEKLY_SCHED_ENT       = "input_text.ev_weekly_schedule"
+AUTO_DEADLINE_ENT      = "input_boolean.ev_auto_deadline"
 
 # ── Charger / slot constants ───────────────────────────────────────────────────
 TZ_LOCAL    = ZoneInfo("Europe/Stockholm")
@@ -54,7 +62,7 @@ SLOT_H      = SLOT_MIN / 60.0   # 0.25 h
 TARIFF_HOUR_START    = 6
 TARIFF_HOUR_END      = 22
 MERGE_RATIO          = 0.20    # merge isolated slot if neighbour ≤ 20 % of avg price
-DEADLINE_SENTINEL_YR = 2099    # year used as "no departure" sentinel in ev_deadline
+DEADLINE_SENTINEL_YR = 2099    # year used as "no departure" sentinel in ev_computed_deadline
 SCHEDULE_DATA_FILE   = "/config/pyscript/ev_schedule_data.json"
 
 # Weekday index → schedule JSON key (Monday=0 … Sunday=6)
@@ -172,31 +180,75 @@ def get_next_departure():
 
 def auto_set_deadline():
     """
-    Calls get_next_departure() and writes the result to input_datetime.ev_deadline.
+    Calls get_next_departure() and writes the result to
+    input_datetime.ev_computed_deadline.
+
+    This is the ONLY function that writes to ev_computed_deadline.
+    input_datetime.ev_deadline is NEVER written by pyscript — it belongs
+    to the user as a manual override.
 
     When auto-deadline mode is active (input_boolean.ev_auto_deadline = on):
-      - If a departure is found: sets ev_deadline to that datetime string.
-      - If no departure found: sets ev_deadline to the 2099-12-31 sentinel so
-        ev_optimizer_recompute() uses opportunistic mode (no deadline).
-
-    The sentinel year (>= DEADLINE_SENTINEL_YR) is recognised in
-    ev_optimizer_recompute() and treated as "no deadline".
+      - If a departure is found: sets ev_computed_deadline to that datetime.
+      - If no departure found: sets ev_computed_deadline to the 2099-12-31
+        sentinel so get_effective_deadline() uses opportunistic mode.
     """
     departure = get_next_departure()
 
     if departure is None:
         input_datetime.set_datetime(
-            entity_id = DEADLINE_ENT,
+            entity_id = COMPUTED_DEADLINE_ENT,
             datetime  = "2099-12-31 23:59:59",
         )
         log.info("ev_optimizer: auto deadline: no departure in next 7 days — opportunistic mode")
     else:
         dt_str = departure.strftime("%Y-%m-%d %H:%M:%S")
         input_datetime.set_datetime(
-            entity_id = DEADLINE_ENT,
+            entity_id = COMPUTED_DEADLINE_ENT,
             datetime  = dt_str,
         )
-        log.info(f"ev_optimizer: auto deadline set to {dt_str}")
+        log.info(f"ev_optimizer: auto deadline computed: {dt_str}")
+
+
+def get_effective_deadline():
+    """
+    Returns the deadline timestamp the optimizer should use, as a float
+    (epoch seconds) or None for opportunistic mode.
+
+    Priority:
+      1. input_datetime.ev_deadline — manual user override — if set and
+         more than 5 minutes in the future.
+      2. input_datetime.ev_computed_deadline — auto from weekly schedule —
+         if set and more than 5 minutes in the future.
+      3. None — opportunistic mode (no deadline).
+
+    Both entities are read via their pre-computed 'timestamp' attribute
+    (always a correct UTC epoch regardless of DST) rather than parsing the
+    state string (which may be a naive local-time string).
+    """
+    now_ts    = datetime.now(tz=timezone.utc).timestamp()
+    min_ahead = now_ts + 5 * 60   # must be at least 5 minutes away
+
+    for ent, label in [
+        (DEADLINE_ENT,         "manual"),
+        (COMPUTED_DEADLINE_ENT, "auto"),
+    ]:
+        attrs  = state.getattr(ent) or {}
+        ts_raw = attrs.get("timestamp")
+        if ts_raw in (None, "unknown", "unavailable"):
+            continue
+        try:
+            ts = float(ts_raw)
+        except Exception:
+            continue
+        sentinel_ts = datetime(DEADLINE_SENTINEL_YR, 1, 1, tzinfo=timezone.utc).timestamp()
+        if ts >= sentinel_ts:
+            continue   # far-future sentinel = no departure scheduled
+        if ts > min_ahead:
+            log.info(f"ev_optimizer: using {label} deadline: {state.get(ent)}")
+            return ts
+
+    log.debug("ev_optimizer: no valid deadline — opportunistic mode")
+    return None
 
 
 def compute_schedule(req_kwh, deadline_ts):
@@ -346,13 +398,15 @@ def ev_optimizer_recompute(**kwargs):
     # ── Entry log ─────────────────────────────────────────────────────────────
     log.info(
         f"ev_optimizer: recomputing at {datetime.now(tz=TZ_LOCAL).isoformat()}, "
-        f"deadline={state.get(DEADLINE_ENT)}, "
+        f"manual_deadline={state.get(DEADLINE_ENT)}, "
+        f"auto_deadline={state.get(COMPUTED_DEADLINE_ENT)}, "
         f"remaining={state.get(REM_KWH_ENT) or '?'} kWh"
     )
 
-    # ── Auto deadline: refresh before reading ev_deadline ─────────────────────
-    # Ensures the deadline is always current even when called directly (e.g.
-    # startup trigger, Nordpool update) without going through the 5-min tick.
+    # ── Auto deadline: refresh ev_computed_deadline ───────────────────────────
+    # Called here so startup / Nordpool-update / hourly paths always have a
+    # fresh computed deadline without waiting for the 5-min tick.
+    # NEVER writes to input_datetime.ev_deadline — that belongs to the user.
     if (state.get(AUTO_DEADLINE_ENT) or "off") == "on":
         auto_set_deadline()
 
@@ -364,29 +418,10 @@ def ev_optimizer_recompute(**kwargs):
         rem_raw = state.get(REM_KWH_ENT)
         req_kwh = float(rem_raw) if rem_raw not in (None, "unknown", "unavailable") else 0.0
 
-    # ── Deadline ───────────────────────────────────────────────────────────────
-    # Use the entity's pre-computed UTC timestamp attribute instead of parsing
-    # the state string. The state string is a naive local-time string whose
-    # timezone interpretation varies; the 'timestamp' attribute is always a
-    # correct UTC epoch regardless of DST offset. This avoids the 2-hour CEST
-    # false-positive where the deadline fired early.
-    deadline_ts = None
-    dl_attrs    = state.getattr(DEADLINE_ENT) or {}
-    dl_ts_raw   = dl_attrs.get("timestamp")
-    if dl_ts_raw not in (None, "unknown", "unavailable"):
-        try:
-            dl_ts       = float(dl_ts_raw)
-            sentinel_ts = datetime(DEADLINE_SENTINEL_YR, 1, 1, tzinfo=timezone.utc).timestamp()
-            if dl_ts >= sentinel_ts:
-                # Far-future sentinel written by auto_set_deadline() or safety
-                # automation when no departure is scheduled — use opportunistic mode
-                log.debug("ev_optimizer: deadline is far-future sentinel — opportunistic mode")
-            elif dl_ts <= datetime.now(tz=timezone.utc).timestamp():
-                log.debug(f"ev_optimizer: deadline ts {dl_ts} is in the past — opportunistic mode")
-            else:
-                deadline_ts = dl_ts
-        except Exception as exc:
-            log.warning(f"ev_optimizer: cannot parse deadline timestamp '{dl_ts_raw}': {exc}")
+    # ── Effective deadline ─────────────────────────────────────────────────────
+    # Manual ev_deadline takes priority; falls back to auto ev_computed_deadline;
+    # returns None for opportunistic mode.
+    deadline_ts = get_effective_deadline()
 
     # ── Compute schedule ───────────────────────────────────────────────────────
     windows, mode, required_slots = compute_schedule(req_kwh, deadline_ts)
@@ -462,20 +497,23 @@ def _ev_recompute_on_change(**kwargs):
 @state_trigger("input_datetime.ev_deadline")
 def on_deadline_changed(**kwargs):
     """
-    Dedicated trigger for deadline changes.
+    Dedicated trigger for manual deadline changes.
 
     Uses task.sleep(1) to allow HA state to fully settle before reading the
     new deadline value. Without the delay, state.getattr(DEADLINE_ENT) may
     still return the old value in the same event cycle.
+
+    NOTE: pyscript never writes to input_datetime.ev_deadline, so this
+    trigger fires only on genuine user actions (UI, automation, API call).
     """
-    log.info("ev_optimizer: deadline changed, recomputing")
+    log.info("ev_optimizer: manual deadline changed, recomputing")
     task.sleep(1)
     ev_optimizer_recompute()
 
 
 @state_trigger("input_text.ev_weekly_schedule")
 def _on_weekly_schedule_changed(**kwargs):
-    """Recompute deadline and schedule whenever the weekly schedule is edited."""
+    """Recompute computed deadline and schedule whenever the weekly schedule is edited."""
     if (state.get(AUTO_DEADLINE_ENT) or "off") == "on":
         auto_set_deadline()
         ev_optimizer_recompute()
@@ -496,7 +534,7 @@ def persist_weekly_schedule(**kwargs):
 
 @state_trigger("input_boolean.ev_auto_deadline")
 def _on_auto_deadline_toggle(**kwargs):
-    """When auto deadline is switched on, immediately compute and apply the next departure."""
+    """When auto deadline is switched on, immediately compute the next departure."""
     if (state.get(AUTO_DEADLINE_ENT) or "off") == "on":
         task.sleep(1)
         auto_set_deadline()
@@ -506,19 +544,21 @@ def _on_auto_deadline_toggle(**kwargs):
 @time_trigger("period(now, 5min)")
 def _auto_deadline_tick(**kwargs):
     """
-    Re-evaluate the next departure every 5 minutes.
+    Re-evaluate the next departure every 5 minutes and update ev_computed_deadline.
 
     Handles rollover: when a departure time passes (e.g. 08:00 → 18:00 same day,
-    or last time today → first time tomorrow), the deadline advances automatically.
+    or last time today → first time tomorrow), the computed deadline advances.
     Only runs when input_boolean.ev_auto_deadline is on.
+
+    Never touches input_datetime.ev_deadline — that is the user's manual override.
     """
     if (state.get(AUTO_DEADLINE_ENT) or "off") != "on":
         return
-    old_dl = state.get(DEADLINE_ENT)
+    old_dl = state.get(COMPUTED_DEADLINE_ENT)
     auto_set_deadline()
-    new_dl = state.get(DEADLINE_ENT)
+    new_dl = state.get(COMPUTED_DEADLINE_ENT)
     if old_dl != new_dl:
-        log.info(f"ev_optimizer: auto deadline rolled over: {old_dl} → {new_dl}")
+        log.info(f"ev_optimizer: computed deadline rolled over: {old_dl} → {new_dl}")
         ev_optimizer_recompute()
 
 
