@@ -334,7 +334,7 @@ Developer Tools → States → set `input_datetime.ev_deadline` to a time 2h fro
 
 | Item | Value |
 |------|-------|
-| Repo | https://github.com/[YOUR_GITHUB_USERNAME]/EV-Charging-Optimizer |
+| Repo | https://github.com/PetrolHead2/EV-Charging-Optimizer |
 | Local | `~/projects/EV-Charging-Optimizer/` |
 
 To sync changes from HA to repo:
