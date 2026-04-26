@@ -338,12 +338,62 @@ Developer Tools → States → set `input_datetime.ev_deadline` to a time 2h fro
         - entity: sensor.jbb78w_state_of_charge
           name: Car SoC
         - entity: sensor.ev_charging_power_kw
-    - type: attribute
-      entity: sensor.ev_schedule
-      attribute: schedule
-      name: Charging schedule
+    - type: conditional
+      conditions:
+        - condition: template
+          value_template: >
+            {{ state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) > now().timestamp() }}
+      card:
+        type: entities
+        entities:
+          - entity: input_datetime.ev_computed_deadline
+            name: Next auto departure
+    - type: markdown
+      content: |
+        {% set schedule = state_attr('sensor.ev_schedule', 'schedule') %}
+        {% set now_ts = now().timestamp() %}
+        **⚡ Charging Schedule**
+        {% if not schedule or schedule | length == 0 %}
+        *No charging windows scheduled*
+        {% else %}
+        | # | Time | Price | Energy |
+        |---|------|-------|--------|
+        {% for w in schedule %}
+        {%   set start_ts = (w.start | as_datetime).timestamp() %}
+        {%   set end_ts   = (w.end   | as_datetime).timestamp() %}
+        {%   set start_str = w.start | as_datetime | as_local | string %}
+        {%   set end_str   = w.end   | as_datetime | as_local | string %}
+        {%   set h_s = start_str[11:16] %}
+        {%   set h_e = end_str[11:16]   %}
+        {%   if start_ts > now_ts %}
+        {%     set icon = "⏳" %}
+        {%   elif end_ts > now_ts %}
+        {%     set icon = "🔋" %}
+        {%   else %}
+        {%     set icon = "✅" %}
+        {%   endif %}
+        | {{ icon }} {{ loop.index }} | {{ h_s }}–{{ h_e }} | {{ w.price | round(3) }} SEK | {{ w.kwh | round(2) }} kWh |
+        {% endfor %}
+        ---
+        **Total:** {{ state_attr('sensor.ev_schedule', 'total_kwh') | round(2) }} kWh ·
+        **Est. cost:** {{ state_attr('sensor.ev_schedule', 'expected_cost') | round(2) }} SEK ·
+        **Mode:** {{ state_attr('sensor.ev_schedule', 'mode') }}
+        {% set next_start = namespace(ts=0) %}
+        {% for w in schedule %}
+        {%   set s = (w.start | as_datetime).timestamp() %}
+        {%   if s > now_ts and next_start.ts == 0 %}
+        {%     set next_start.ts = s %}
+        {%   endif %}
+        {% endfor %}
+        {% if next_start.ts > 0 %}
+        {% set diff = (next_start.ts - now_ts) | int %}
+        **Next window in:** {{ diff // 3600 }}h {{ (diff % 3600) // 60 }}min
+        {% endif %}
+        {% endif %}
   ```
-  Window start/end times are stored in local Stockholm time with `+02:00` / `+01:00` offset. To show only HH:MM in a template: `{{ window.start[11:16] }}`.
+  The `attributes.schedule` list uses ISO strings (`"start"`, `"end"` with `+02:00` offset). Parse with `(w.start | as_datetime).timestamp()` for epoch comparisons. `w.start | as_datetime | as_local | string` gives a string where `[11:16]` extracts `HH:MM`.
+  Icons: ⏳ upcoming, 🔋 currently charging, ✅ completed.
+  The card is added to the "car" view in Lovelace storage (`.storage/lovelace.lovelace`) — position index 4 in sections[0].cards (between Status entities and Tariff protection heading).
 - **Adaptive power**: Zaptec GO supports per-phase current control. Could charge at reduced rate during moderately-priced slots rather than full on/off.
 - **Notification on missed target**: If EV departures without reaching target SoC, send a mobile notification.
 - **Solar integration**: If a solar inverter sensor is added, bias slot selection toward midday when solar production is high.
