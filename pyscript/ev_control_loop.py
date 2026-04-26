@@ -207,6 +207,17 @@ def set_charger(on, reason):
         else:
             zaptec.stop_charging(charger_id=ZAPTEC_DEVICE_ID)
             log.info(f"ev_control_loop: STOPPED charging — {reason}")
+            # Reset current to circuit maximum so manual charging always works at
+            # full speed even if HA becomes unreachable after this stop.
+            zaptec.limit_current(
+                installation_id   = ZAPTEC_INSTALL_ID,
+                available_current = CIRCUIT_MAX_AMPS,
+            )
+            reason = reason + f" | Zaptec reset to {CIRCUIT_MAX_AMPS}A"
+            log.info(
+                f"ev_control_loop: Zaptec reset to full current {CIRCUIT_MAX_AMPS}A"
+                f" — ready for manual use"
+            )
 
         # Record time of this transition for hysteresis tracking
         input_datetime.set_datetime(entity_id=LAST_CHANGE_ENT, datetime=now_str)
@@ -383,6 +394,32 @@ def ev_control_loop():
 
     # ── Act ───────────────────────────────────────────────────────────────────
     set_charger(desired, reason)
+
+
+# ── Startup: restore full current ─────────────────────────────────────────────
+
+@time_trigger("startup")
+def reset_zaptec_on_startup(**kwargs):
+    """
+    Reset Zaptec to full circuit current on every HA startup.
+
+    If HA was restarted while the current was throttled to tariff-hour limits,
+    the charger would remain limited with no way to restore it without HA.
+    This ensures manual charging always works at full speed immediately after
+    startup, regardless of the throttle state at the time of the last shutdown.
+
+    task.sleep(10) lets the Zaptec integration finish loading before we send
+    a command — sending too early may silently fail.
+    """
+    task.sleep(10)
+    zaptec.limit_current(
+        installation_id   = ZAPTEC_INSTALL_ID,
+        available_current = CIRCUIT_MAX_AMPS,
+    )
+    log.info(
+        f"ev_control_loop: startup: Zaptec reset to full current "
+        f"{CIRCUIT_MAX_AMPS}A — ready for manual use"
+    )
 
 
 # ── Scheduled tick ────────────────────────────────────────────────────────────

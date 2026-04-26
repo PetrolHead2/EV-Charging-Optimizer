@@ -1149,6 +1149,22 @@ programmatic use. The optimizer uses the service calls.
 level (affects all chargers on the installation). With a single charger this
 is equivalent to per-charger limiting.
 
+**Manual charging fallback (HA unreachable):**
+
+The control loop always restores Zaptec to full circuit current (25A) as part
+of every ON→OFF transition and on every HA startup/reload:
+
+- **On stop:** `set_charger(False, ...)` calls `zaptec.limit_current(available_current=25)`
+  immediately after `zaptec.stop_charging()`. `ev_decision_reason` will show
+  `| Zaptec reset to 25A` appended to the stop reason.
+- **On startup:** `reset_zaptec_on_startup()` fires 10 seconds after every HA
+  reload or restart, unconditionally resetting to 25A.
+
+If HA becomes unreachable after a charging stop, simply plug in the car — Zaptec
+will auto-start at 25A (full circuit capacity) without any HA intervention.
+If HA was restarted while the charger was throttled to the tariff-hour limit
+(e.g., 6A), the startup reset corrects this within 10 seconds.
+
 ---
 
 ## 9. Mercedes Me Integration
