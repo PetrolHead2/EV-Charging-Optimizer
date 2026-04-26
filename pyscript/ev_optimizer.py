@@ -62,7 +62,7 @@ SLOT_H      = SLOT_MIN / 60.0   # 0.25 h
 TARIFF_HOUR_START    = 6
 TARIFF_HOUR_END      = 22
 MERGE_RATIO          = 0.20    # merge isolated slot if neighbour ≤ 20 % of avg price
-DEADLINE_SENTINEL_YR = 2030    # reject any deadline from this year onward (implausible / stale sentinel)
+SCHEDULE_HORIZON_DAYS = 8   # get_next_departure() looks 7 days ahead; anything beyond this is stale
 SCHEDULE_DATA_FILE   = "/config/pyscript/ev_schedule_data.json"
 
 # Weekday index → schedule JSON key (Monday=0 … Sunday=6)
@@ -197,24 +197,25 @@ def auto_set_deadline():
       - If no departure found: leaves ev_computed_deadline unchanged and logs.
         The optimizer falls through to opportunistic mode via get_effective_deadline().
         No far-future sentinel date is written — the entity retains its last valid
-        value (or whatever value it currently holds) and the year > 2030 sanity
-        check in get_effective_deadline() will reject implausible old values.
+        value (or whatever value it currently holds).  get_effective_deadline()
+        rejects any timestamp that is not > 5 minutes in the future, so stale
+        values are naturally ignored.
     """
-    # ── One-time cleanup: clear any stale far-future sentinel ─────────────────
-    # Old code versions wrote "2099-12-31 23:59:59" to ev_computed_deadline
-    # when no departure was found.  Clear it now on every call so the entity
-    # shows a meaningful state and get_effective_deadline() falls through to
-    # opportunistic mode correctly.
+    # ── One-time cleanup: clear any stale far-future value ────────────────────
+    # Old code versions wrote far-future sentinel dates (2099, 2030) to
+    # ev_computed_deadline when no departure was found.  Clear such values now
+    # (anything beyond SCHEDULE_HORIZON_DAYS from now is implausible because
+    # get_next_departure() only looks 7 days ahead).
     local_tz = ZoneInfo(hass.config.time_zone)
+    now_ts   = datetime.now(local_tz).timestamp()
     _attrs   = state.getattr(COMPUTED_DEADLINE_ENT) or {}
     _ts_raw  = _attrs.get("timestamp")
     if _ts_raw not in (None, "unknown", "unavailable"):
         try:
-            _dl_year = datetime.fromtimestamp(float(_ts_raw), tz=local_tz).year
-            if _dl_year > 2030:
+            if float(_ts_raw) > now_ts + SCHEDULE_HORIZON_DAYS * 86400:
                 log.warning(
-                    f"ev_optimizer: auto_set_deadline: clearing stale "
-                    f"far-future ev_computed_deadline (year {_dl_year})"
+                    "ev_optimizer: auto_set_deadline: clearing stale "
+                    "far-future ev_computed_deadline"
                 )
                 input_datetime.set_datetime(
                     entity_id = COMPUTED_DEADLINE_ENT,
@@ -270,18 +271,6 @@ def get_effective_deadline():
         try:
             ts = float(ts_raw)
         except Exception:
-            continue
-        sentinel_ts = datetime(DEADLINE_SENTINEL_YR, 1, 1, tzinfo=timezone.utc).timestamp()
-        if ts >= sentinel_ts:
-            continue   # far-future sentinel = no departure scheduled
-        # Sanity check: reject any deadline year > 2030 (catches stale sentinel
-        # values that may have been written by older code versions).
-        dl_year = datetime.fromtimestamp(ts, tz=ZoneInfo(hass.config.time_zone)).year
-        if dl_year > 2030:
-            log.warning(
-                f"ev_optimizer: ignoring implausible {label} deadline "
-                f"(year {dl_year}) — treating as opportunistic mode"
-            )
             continue
         if ts > min_ahead:
             log.info(f"ev_optimizer: using {label} deadline: {state.get(ent)}")
@@ -905,22 +894,20 @@ def restore_weekly_schedule(**kwargs):
 def _ev_recompute_on_startup(**kwargs):
     """Recompute schedule on HA startup to restore lost pyscript sensor state.
 
-    Also clears any stale 2099 sentinel value from ev_computed_deadline that
-    may have been written by older code versions — replaces it with the current
-    time so the entity no longer shows a far-future date in the UI.
-    The year > 2030 check in get_effective_deadline() would already ignore such
-    a value, but clearing it makes the UI state unambiguous.
+    Also clears any stale far-future value from ev_computed_deadline that may
+    have been written by older code versions (anything beyond
+    SCHEDULE_HORIZON_DAYS from now is implausible — get_next_departure() only
+    looks 7 days ahead).
     """
     local_tz = ZoneInfo(hass.config.time_zone)
+    now_ts   = datetime.now(local_tz).timestamp()
     attrs    = state.getattr(COMPUTED_DEADLINE_ENT) or {}
     ts_raw   = attrs.get("timestamp")
     if ts_raw not in (None, "unknown", "unavailable"):
         try:
-            dl_year = datetime.fromtimestamp(float(ts_raw), tz=local_tz).year
-            if dl_year > 2030:
+            if float(ts_raw) > now_ts + SCHEDULE_HORIZON_DAYS * 86400:
                 log.warning(
-                    f"ev_optimizer: clearing implausible ev_computed_deadline "
-                    f"(year {dl_year}) on startup"
+                    "ev_optimizer: clearing implausible ev_computed_deadline on startup"
                 )
                 input_datetime.set_datetime(
                     entity_id = COMPUTED_DEADLINE_ENT,

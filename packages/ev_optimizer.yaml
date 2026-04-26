@@ -110,12 +110,11 @@ template:
         state: >
           {%- set now_ts = now().timestamp() | float -%}
           {%- set min_ahead = now_ts + 300 -%}
-          {%- set sentinel = as_timestamp('2030-01-01T00:00:00+00:00') | float -%}
           {%- set man_ts = state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) -%}
           {%- set auto_ts = state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) -%}
-          {%- if man_ts > min_ahead and man_ts < sentinel -%}
+          {%- if man_ts > min_ahead -%}
             {{ ([0, ((man_ts - now_ts) / 900) | int] | max) }}
-          {%- elif auto_ts > min_ahead and auto_ts < sentinel -%}
+          {%- elif auto_ts > min_ahead -%}
             {{ ([0, ((auto_ts - now_ts) / 900) | int] | max) }}
           {%- else -%}
             999
@@ -213,8 +212,7 @@ automation:
         value_template: >
           {{ state_attr('input_datetime.ev_deadline', 'timestamp') is not none
              and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) < now().timestamp()
-             and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) > 946684800
-             and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) < as_timestamp('2030-01-01T00:00:00+00:00') }}
+             and state_attr('input_datetime.ev_deadline', 'timestamp') | float(0) > 946684800 }}
     action:
       - service: zaptec.stop_charging
         data:
@@ -243,8 +241,7 @@ automation:
         value_template: >
           {{ state_attr('input_datetime.ev_computed_deadline', 'timestamp') is not none
              and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) < now().timestamp()
-             and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) > 946684800
-             and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) < as_timestamp('2030-01-01T00:00:00+00:00') }}
+             and state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) > 946684800 }}
     action:
       - service: zaptec.stop_charging
         data:
