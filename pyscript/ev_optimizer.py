@@ -225,6 +225,7 @@ def auto_set_deadline():
 
     if departure is None:
         log.info("ev_optimizer: auto deadline: no upcoming departure — opportunistic mode active")
+        return
     else:
         dt_str = departure.strftime("%Y-%m-%d %H:%M:%S")
         input_datetime.set_datetime(
