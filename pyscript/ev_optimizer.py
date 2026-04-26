@@ -241,12 +241,12 @@ def get_effective_deadline():
     (or None for opportunistic mode) and source is "manual", "auto", or
     "opportunistic".
 
-    Priority:
-      1. input_datetime.ev_deadline — manual user override — if set and
-         more than 5 minutes in the future.
-      2. input_datetime.ev_computed_deadline — auto from weekly schedule —
-         if set and more than 5 minutes in the future.
-      3. (None, "opportunistic") — no deadline.
+    Collects ALL valid future deadlines (manual + auto) and returns the NEAREST
+    one.  This allows multiple trips to be planned simultaneously — the system
+    charges for the nearest deadline first, then automatically chains to the next
+    as each passes.  Example: weekly schedule has Mon 09:00 (auto) and a manual
+    deadline is set for Wed 23:55; the optimizer picks Mon 09:00 first, then
+    automatically switches to Wed 23:55 after Monday's departure.
 
     Both entities are read via their pre-computed 'timestamp' attribute
     (always a correct UTC epoch regardless of DST) rather than parsing the
@@ -258,8 +258,9 @@ def get_effective_deadline():
     now_ts    = datetime.now(tz=TZ_LOCAL).timestamp()
     min_ahead = now_ts + 5 * 60   # must be at least 5 minutes away
 
+    candidates = []
     for ent, label in [
-        (DEADLINE_ENT,         "manual"),
+        (DEADLINE_ENT,          "manual"),
         (COMPUTED_DEADLINE_ENT, "auto"),
     ]:
         attrs  = state.getattr(ent) or {}
@@ -271,11 +272,19 @@ def get_effective_deadline():
         except Exception:
             continue
         if ts > min_ahead:
-            log.info(f"ev_optimizer: using {label} deadline: {state.get(ent)}")
-            return ts, label
+            candidates.append((ts, label))
 
-    log.debug("ev_optimizer: no valid deadline — opportunistic mode")
-    return None, "opportunistic"
+    if not candidates:
+        log.debug("ev_optimizer: no valid deadline — opportunistic mode")
+        return None, "opportunistic"
+
+    nearest = min(candidates, key=lambda c: c[0])
+    log.info(
+        f"ev_optimizer: using {nearest[1]} deadline "
+        f"{datetime.fromtimestamp(nearest[0], tz=TZ_LOCAL).strftime('%a %d %b %H:%M')} "
+        f"(of {len(candidates)} candidate(s))"
+    )
+    return nearest[0], nearest[1]
 
 
 def merge_into_windows(slots):
@@ -723,15 +732,17 @@ def ev_optimizer_recompute(**kwargs):
         SCHEDULE_ENT,
         value          = json.dumps(state_windows, separators=(',', ':')),
         new_attributes = {
-            "schedule":       windows,
-            "expected_cost":  total_cost,
-            "total_kwh":      total_kwh,
-            "computed_at":    now_iso,
-            "mode":           mode,
-            "required_slots": required_slots,
-            "required_kwh":   round(req_kwh, 2),
-            "friendly_name":  "EV Charging Schedule",
-            "icon":           "mdi:calendar-clock",
+            "schedule":        windows,
+            "expected_cost":   total_cost,
+            "total_kwh":       total_kwh,
+            "computed_at":     now_iso,
+            "mode":            mode,
+            "required_slots":  required_slots,
+            "required_kwh":    round(req_kwh, 2),
+            "deadline_source": deadline_source,
+            "deadline_ts":     deadline_ts,
+            "friendly_name":   "EV Charging Schedule",
+            "icon":            "mdi:calendar-clock",
         },
     )
 

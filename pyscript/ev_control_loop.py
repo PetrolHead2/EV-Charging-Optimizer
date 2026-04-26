@@ -302,10 +302,22 @@ def ev_control_loop():
     desired   = should_charge_now(schedule)
     price_str = _current_price_str()
 
+    # Read deadline info published by ev_optimizer into sensor.ev_schedule attrs
+    sched_attrs = state.getattr(SCHEDULE_ENT) or {}
+    dl_source   = sched_attrs.get("deadline_source") or "opportunistic"
+    dl_ts       = sched_attrs.get("deadline_ts")
+
     if desired:
         reason = f"In scheduled window ({price_str})"
     else:
-        reason = f"Outside scheduled windows ({price_str})"
+        if dl_ts and dl_source != "opportunistic":
+            try:
+                dl_str = datetime.fromtimestamp(float(dl_ts), tz=TZ_LOCAL).strftime("%a %d %b %H:%M")
+                reason = f"Outside scheduled windows ({price_str}) — deadline: {dl_source} {dl_str}"
+            except Exception:
+                reason = f"Outside scheduled windows ({price_str})"
+        else:
+            reason = f"Outside scheduled windows ({price_str})"
 
     # ── Hysteresis guard (steps 5 & 6 only — deadline pressure already returned) ──
     if not check_hysteresis(desired):
