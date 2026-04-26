@@ -27,6 +27,8 @@ the home assistant is a docker installation on the machine "debian" wich is ssh 
 [YOUR_SSH_PASSWORD]=eankod89
 [YOUR_HA_HOST]=debian
 [YOUR_HA_HOSTNAME]=koffern.duckdns.org
+HA_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI5N2U2MDM3OWY2ZGI0Yjg5OWFhMWIyZWJmYWQ4MGRlYSIsImlhdCI6MTc3NzAyMzk4OSwiZXhwIjoyMDkyMzgzOTg5fQ.jowul0Q2pQq0t27x6CvXPKHbq8ifh1-gfRe8iM9QEOo
+
 
 ## Project Files
 
@@ -203,7 +205,7 @@ The optimizer has three cooperating layers. The **schedule layer** (`ev_optimize
 
 The **control layer** (`ev_control_loop.py`) runs every 5 minutes, on pyscript startup, and immediately whenever `sensor.laddbox_charger_mode` transitions to `"charging"`. The reactive charge-start trigger (`ev_control_on_charge_start`) closes the gap between car connection (when Zaptec may auto-start) and the next scheduled tick, stopping unauthorised charging within seconds. All three entry points share the same decision tree: manual override modes (Charge now / Stop) take absolute priority; then it checks whether the current time falls inside any scheduled window; deadline pressure (`binary_sensor.ev_deadline_pressure`) can force charging on even outside a window; a 15-minute hysteresis guard prevents rapid toggling; and finally a **consumption guard** blocks charging if the projected hourly kWh would exceed `input_number.ev_max_hourly_kwh`. The guard only applies during Ellevio tariff hours (06:00–22:00 local time) and can be disabled via `input_boolean.ev_tariff_guard_enabled`. All state changes write a human-readable reason to `input_text.ev_decision_reason`.
 
-The **safety layer** (automations in `packages/ev_optimizer.yaml`) runs independently of pyscript as a hard-stop backstop. Four automations cover: energy target reached (ev_remaining_kwh < 0.2 kWh), SoC target reached (jbb78w_state_of_charge > 95%), departure deadline passed (resets deadline to 2099 to prevent re-trigger), and Nordpool data unavailable. These automations do not conflict with the existing 8 HA automations because they use different triggers and conditions.
+The **safety layer** (automations in `packages/ev_optimizer.yaml`) runs independently of pyscript as a hard-stop backstop. Three automations cover: energy target reached (ev_remaining_kwh < 0.2 kWh), departure deadline passed (resets deadline to 2000-01-01 to prevent re-trigger), and Nordpool data unavailable. The Mercedes Me BMS manages battery charge termination natively — HA does not interfere with SoC. The SoC safety stop was deliberately removed on 2026-04-26. These automations do not conflict with the existing HA automations because they use different triggers and conditions.
 
 ## Known Quirks
 
@@ -254,6 +256,8 @@ The **safety layer** (automations in `packages/ev_optimizer.yaml`) runs independ
 24. **`get_next_departure()` always uses explicit date components**: Departure datetimes are constructed as `datetime(year=target_date.year, month=target_date.month, day=target_date.day, hour=h, minute=m, second=0, tzinfo=local_tz)` — never via `datetime.strptime()` without a full date (Python defaults missing date components to 1900 or 2000 depending on version). The 15-minute look-ahead check uses epoch comparison (`candidate.timestamp() > now_ts + 900`) rather than a direct datetime comparison, consistent with the BUG A fix pattern throughout the codebase.
 
 25. **Opportunistic mode selects cheap slots without a completion guarantee**: When `get_effective_deadline()` returns `(None, "opportunistic")` the recompute path calls `compute_opportunistic_schedule()` instead of `compute_schedule()`. Opportunistic mode selects all slots at or below the median price in the next 24 hours — no slot-count limit and no guarantee that a specific kWh target is met. The schedule `mode` attribute will be `"opportunistic"` and `required_slots` will be 0. `compute_schedule()` is only called when a valid deadline exists. To verify opportunistic mode: disable `input_boolean.ev_auto_deadline`, set both deadline entities to the 2099 sentinel, trigger recompute, and check `sensor.ev_schedule` attributes for `"mode": "opportunistic"`.
+
+26. **SoC safety stop deliberately removed (2026-04-26)**: The `ev_safety_soc_reached` automation (which hard-stopped charging at 95% SoC) was removed. The Mercedes Me BMS manages its own battery charge termination natively and will stop at the correct level automatically. HA only stops charging based on kWh target, departure deadline, and price data availability. Do not re-add a SoC threshold stop.
 
 18. **Schedule grid iframe card** (`/local/ev_schedule_grid.html`): The weekly departure grid is embedded as a `type: iframe` Lovelace card pointing to `/local/ev_schedule_grid.html`. In Docker HA, `/config/www/` maps to `/local/` for browser access. If the card shows blank, check: (a) the file exists at `/media/pi/NextCloud/homeassistant/www/ev_schedule_grid.html` on the host, (b) HA has served it at least once (try opening `https://[YOUR_HA_HOSTNAME]:8123/local/ev_schedule_grid.html` directly), (c) the `HA_TOKEN` constant in the file has been replaced with a valid long-lived access token.
 

@@ -170,33 +170,7 @@ automation:
           option: "Stop"
     mode: single
 
-  # 2. Stop when the Mercedes SoC reaches 95 %
-  - id: ev_safety_soc_reached
-    alias: "EV safety – SoC target reached"
-    description: >
-      Hard-stops the charger when the car battery reaches 95 % SoC
-      while the car reports it is actively charging.
-    trigger:
-      - platform: numeric_state
-        entity_id: sensor.jbb78w_state_of_charge
-        above: 95
-    condition:
-      # Only fire when the car itself reports active charging
-      - condition: state
-        entity_id: binary_sensor.jbb78w_charging_active
-        state: "on"
-    action:
-      - service: zaptec.stop_charging
-        data:
-          charger_id: d0775df2-6290-4569-bcd0-b579f8b9dde3
-      - service: input_text.set_value
-        target:
-          entity_id: input_text.ev_decision_reason
-        data:
-          value: "Safety stop: SoC 95% target reached"
-    mode: single
-
-  # 3a. Stop when the manual departure deadline has passed
+  # 2. Stop when the manual departure deadline has passed
   - id: ev_safety_manual_deadline_passed
     alias: "EV safety – manual deadline passed"
     description: >

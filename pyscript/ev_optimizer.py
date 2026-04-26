@@ -214,12 +214,9 @@ def auto_set_deadline():
         try:
             if float(_ts_raw) > now_ts + SCHEDULE_HORIZON_DAYS * 86400:
                 log.warning(
-                    "ev_optimizer: auto_set_deadline: clearing stale "
-                    "far-future ev_computed_deadline"
-                )
-                input_datetime.set_datetime(
-                    entity_id = COMPUTED_DEADLINE_ENT,
-                    datetime  = datetime.now(local_tz).strftime("%Y-%m-%d %H:%M:%S"),
+                    "ev_optimizer: auto_set_deadline: stale far-future "
+                    "ev_computed_deadline detected — leaving entity unchanged "
+                    "(get_effective_deadline will reject it)"
                 )
         except Exception as _exc:
             log.warning(f"ev_optimizer: auto_set_deadline: stale deadline cleanup error: {_exc}")
@@ -907,11 +904,8 @@ def _ev_recompute_on_startup(**kwargs):
         try:
             if float(ts_raw) > now_ts + SCHEDULE_HORIZON_DAYS * 86400:
                 log.warning(
-                    "ev_optimizer: clearing implausible ev_computed_deadline on startup"
-                )
-                input_datetime.set_datetime(
-                    entity_id = COMPUTED_DEADLINE_ENT,
-                    datetime  = datetime.now(local_tz).strftime("%Y-%m-%d %H:%M:%S"),
+                    "ev_optimizer: stale far-future ev_computed_deadline detected on startup "
+                    "— leaving entity unchanged (get_effective_deadline will reject it)"
                 )
         except Exception as exc:
             log.warning(f"ev_optimizer: startup deadline cleanup error: {exc}")

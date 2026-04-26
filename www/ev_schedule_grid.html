@@ -308,14 +308,13 @@
 
     // ── Status line + auto-toggle state ──────────────────────────────────────
     async function loadStatus() {
-      const SENTINEL_PREFIX = "2099";
-      const MIN_AHEAD_MS    = 5 * 60 * 1000;   // 5 minutes
+      const MIN_AHEAD_MS = 5 * 60 * 1000;   // 5 minutes
 
-      function isFutureDeadline(stateStr) {
-        if (!stateStr || stateStr.startsWith(SENTINEL_PREFIX)) return false;
-        // state string is "YYYY-MM-DD HH:MM:SS" local time
-        const ts = new Date(stateStr.replace(" ", "T")).getTime();
-        return ts > Date.now() + MIN_AHEAD_MS;
+      function formatDeadline(epochSec) {
+        // Format UTC epoch seconds as local "YYYY-MM-DD HH:MM"
+        const d = new Date(epochSec * 1000);
+        const pad = n => String(n).padStart(2, "0");
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
       }
 
       try {
@@ -324,16 +323,17 @@
           haGet("/api/states/input_datetime.ev_computed_deadline"),
         ]);
 
-        const manualState = manualData.state;
-        const autoState   = autoData.state;
-        const depEl       = document.getElementById("next-dep");
+        const nowMs     = Date.now();
+        const manualTs  = (manualData.attributes?.timestamp ?? 0) * 1000;
+        const autoTs    = (autoData.attributes?.timestamp ?? 0) * 1000;
+        const depEl     = document.getElementById("next-dep");
 
-        if (isFutureDeadline(manualState)) {
-          depEl.textContent = manualState + " (manual)";
-        } else if (isFutureDeadline(autoState)) {
-          depEl.textContent = autoState + " (auto)";
+        if (manualTs > nowMs + MIN_AHEAD_MS) {
+          depEl.textContent = formatDeadline(manualTs / 1000) + " (manual)";
+        } else if (autoTs > nowMs + MIN_AHEAD_MS) {
+          depEl.textContent = formatDeadline(autoTs / 1000) + " (auto)";
         } else {
-          depEl.textContent = "none — opportunistic mode";
+          depEl.textContent = "Auto (opportunistic — no deadline set)";
         }
       } catch (e) {
         document.getElementById("next-dep").textContent = "unavailable";
