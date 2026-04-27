@@ -140,10 +140,24 @@ def should_charge_now(schedule):
         return False
 
     now_ts = datetime.now(tz=timezone.utc).timestamp()
+    local_tz = ZoneInfo("Europe/Stockholm")
+    now_local_str = datetime.fromtimestamp(now_ts, tz=local_tz).strftime("%H:%M:%S")
+
+    log.info(
+        f"should_charge_now: now={now_local_str} checking {len(schedule)} window(s)"
+    )
 
     for window in schedule:
         try:
-            if now_ts >= float(window["s"]) and now_ts < float(window["e"]):
+            w_start = float(window["s"])
+            w_end   = float(window["e"])
+            w_start_str = datetime.fromtimestamp(w_start, tz=local_tz).strftime("%H:%M")
+            w_end_str   = datetime.fromtimestamp(w_end,   tz=local_tz).strftime("%H:%M")
+            active = now_ts >= w_start and now_ts < w_end
+            log.info(
+                f"  window {w_start_str}–{w_end_str}: {'ACTIVE' if active else 'inactive'}"
+            )
+            if active:
                 return True
         except Exception as exc:
             log.warning(f"ev_control_loop: cannot parse window {window}: {exc}")

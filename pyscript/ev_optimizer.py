@@ -401,10 +401,19 @@ def compute_schedule(req_kwh, deadline_ts):
             f"  mode=opportunistic  total_slots={len(all_slots)}"
         )
 
+    # Include the currently-active slot by looking back one full slot duration.
+    # Without this, a recompute triggered 1 second after a slot boundary (e.g.
+    # by task.sleep(1) in on_price_update) would exclude that slot because
+    # slot_start == now_ts - 1, failing the strict >= now_ts test.  The -900s
+    # lookback means: include any slot that started within the last 15 minutes
+    # and has not yet ended.  Slots that have already fully elapsed are still
+    # excluded by the end_ts <= deadline_ts / horizon_ts upper bound.
+    slot_lookback_ts = now_ts - 900   # one 15-minute slot duration in seconds
+
     if deadline_ts:
         eligible = [
             s for s in all_slots
-            if s["start_ts"] >= now_ts
+            if s["start_ts"] >= slot_lookback_ts
             and s["end_ts"]   <= deadline_ts
         ]
         mode = "deadline"
@@ -412,7 +421,7 @@ def compute_schedule(req_kwh, deadline_ts):
         horizon_ts = now_ts + 48 * 3600
         eligible   = [
             s for s in all_slots
-            if s["start_ts"] >= now_ts
+            if s["start_ts"] >= slot_lookback_ts
             and s["end_ts"]   <= horizon_ts
         ]
         mode = "opportunistic"
@@ -616,9 +625,10 @@ def compute_opportunistic_schedule(all_slots):
     now_ts  = datetime.now(tz=ZoneInfo(hass.config.time_zone)).timestamp()
     horizon = now_ts + 86400   # 24 h ahead
 
+    slot_lookback_ts = now_ts - 900   # include currently-active slot
     future_slots = [
         s for s in all_slots
-        if s["start"].timestamp() >= now_ts
+        if s["start"].timestamp() >= slot_lookback_ts
         and s["end"].timestamp() <= horizon
     ]
 
