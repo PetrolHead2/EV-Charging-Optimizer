@@ -42,6 +42,10 @@ input_boolean:
     name: "EV auto deadline from weekly schedule"
     initial: true
     icon: mdi:calendar-sync
+  ev_consumption_guard_active:
+    name: "EV consumption guard cooldown"
+    initial: false
+    icon: mdi:shield-alert
 
 input_text:
   ev_weekly_schedule:

@@ -21,6 +21,7 @@ Writes: switch.laddbox_charging
         number.laddbox_charger_max_current
         input_datetime.ev_last_state_change
         input_text.ev_decision_reason
+        input_boolean.ev_consumption_guard_active  (cooldown flag)
 
 Triggers:
   ev_control_loop_tick()       — @time_trigger every 5 min + startup
@@ -51,7 +52,8 @@ PRICE_ENT        = "sensor.nordpool_kwh_se3_sek_3_10_025"
 CHARGE_PWR_ENT   = "sensor.ev_charging_power_kw"
 TIBBER_ACCUM_ENT = "sensor.tibber_pulse_dianavagen_15_accumulated_consumption_current_hour"
 TIBBER_AVG_W_ENT = "sensor.tibber_pulse_dianavagen_15_average_power"
-GUARD_ENT        = "input_boolean.ev_tariff_guard_enabled"
+GUARD_ENT         = "input_boolean.ev_tariff_guard_enabled"
+GUARD_COOLDOWN_ENT = "input_boolean.ev_consumption_guard_active"
 MAX_KWH_ENT      = "input_number.ev_max_hourly_kwh"
 MAX_TARIFF_KW_ENT = "input_number.ev_max_tariff_power_kw"
 SLOTS_AVAIL_ENT  = "sensor.ev_slots_available"
@@ -520,6 +522,21 @@ def ev_control_loop():
             log.debug("ev_control_loop: Consumption guard: outside tariff hours")
 
         else:
+            # ── Cooldown check — guard fired earlier this hour ─────────────────
+            # Prevents the toggle loop where guard stops charging, then the next
+            # 5-minute tick restarts it (because the schedule window is still active),
+            # only to have the guard fire again and stop it again.
+            if (state.get(GUARD_COOLDOWN_ENT) or "off") == "on":
+                log.debug(
+                    "ev_control_loop: Consumption guard: cooldown active, "
+                    "holding OFF until next hour"
+                )
+                set_charger(
+                    False,
+                    "Consumption guard: holding OFF until next hour boundary",
+                )
+                return
+
             accum_raw = state.get(TIBBER_ACCUM_ENT)
             avg_w_raw = state.get(TIBBER_AVG_W_ENT)
 
@@ -542,13 +559,27 @@ def ev_control_loop():
                 )
 
                 if projected_total > threshold:
-                    set_charger(
-                        False,
+                    guard_reason = (
                         f"Consumption guard: house {current_house_kw:.1f} kW "
                         f"+ EV {charging_power_kw:.1f} kW = projected "
                         f"{projected_total:.1f} kWh this hour "
-                        f"(cap {threshold:.1f} kWh)",
+                        f"(cap {threshold:.1f} kWh)"
                     )
+                    set_charger(False, guard_reason)
+
+                    # Activate cooldown until start of next hour.
+                    # Any invocation that sees cooldown=on will stop charging and
+                    # return immediately — no toggle loop.
+                    now2 = datetime.now(tz=local_tz)
+                    seconds_to_next_hour = (60 - now2.minute) * 60 - now2.second
+                    input_boolean.turn_on(entity_id=GUARD_COOLDOWN_ENT)
+                    log.info(
+                        f"ev_control_loop: Consumption guard: cooldown active for "
+                        f"{seconds_to_next_hour}s until next hour"
+                    )
+                    task.sleep(seconds_to_next_hour + 5)
+                    input_boolean.turn_off(entity_id=GUARD_COOLDOWN_ENT)
+                    log.info("ev_control_loop: Consumption guard: cooldown cleared")
                     return
 
                 log.debug(
@@ -623,3 +654,20 @@ def on_zaptec_state_changed(value=None, old_value=None, **kwargs):
     # Car is (now) connected — let HA state settle then run the full decision chain.
     task.sleep(2)
     ev_control_loop()
+
+
+# ── Consumption guard hourly reset ────────────────────────────────────────────
+
+@time_trigger("period(now, 1h)")
+def reset_consumption_guard_hourly(**kwargs):
+    """
+    Backup reset for the consumption guard cooldown boolean.
+
+    The primary reset is a task.sleep() inside ev_control_loop() that clears
+    the boolean at the next hour boundary.  If HA restarts during that sleep
+    the task is killed and the boolean stays 'on', permanently blocking charging.
+    This trigger fires every hour and clears the boolean as a safety net.
+    """
+    if (state.get(GUARD_COOLDOWN_ENT) or "off") == "on":
+        input_boolean.turn_off(entity_id=GUARD_COOLDOWN_ENT)
+        log.info("ev_control_loop: Consumption guard: hourly reset")
