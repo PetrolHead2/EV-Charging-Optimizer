@@ -216,6 +216,23 @@ def _current_price_str():
 
 # ── Public functions ───────────────────────────────────────────────────────────
 
+def get_schedule():
+    """
+    Read the current schedule fresh from sensor.ev_schedule.
+    Never cached — always reads live state on every call.
+    Returns a list of compact-epoch window dicts {s, e} or empty list.
+    """
+    try:
+        sched_state = state.get(SCHEDULE_ENT)
+        if not sched_state or sched_state in ("unknown", "unavailable", "[]", ""):
+            log.debug("get_schedule: no schedule available")
+            return []
+        return json.loads(sched_state)
+    except Exception as exc:
+        log.warning(f"get_schedule: failed: {exc}")
+        return []
+
+
 def should_charge_now(schedule):
     """
     Return True if the current UTC time falls within any window in schedule.
@@ -258,10 +275,13 @@ def should_charge_now(schedule):
                 continue
             w_start_str = datetime.fromtimestamp(w_start, tz=local_tz).strftime("%H:%M")
             w_end_str   = datetime.fromtimestamp(w_end,   tz=local_tz).strftime("%H:%M")
-            # Active: window started within the last 900 s (one 15-min slot) AND
-            # has not yet ended.  The lookback covers the full current slot so we
-            # never miss a window that opened seconds before the tick ran.
-            active = w_start >= now_ts - 900 and w_end > now_ts
+            # Active: window has already started (w_start <= now_ts) AND
+            # has not yet ended (w_end > now_ts).
+            # A small forward tolerance (+60 s) catches the edge case where the
+            # control loop fires 1-2 seconds before a window boundary; this is
+            # much safer than a 900 s lookback which incorrectly activates ANY
+            # future window (since future timestamps always satisfy >= past values).
+            active = w_start <= now_ts + 60 and w_end > now_ts
             log.info(
                 f"  window {w_start_str}–{w_end_str}: {'ACTIVE' if active else 'inactive'}"
             )
@@ -685,15 +705,8 @@ def ev_control_loop():
     log.info("ev_control_loop: Priority step 4: consumption guard OK — charging allowed")
 
     # ── Step 5: No schedule — safe default ────────────────────────────────────
-    # sensor.ev_schedule state IS the JSON string; parse it directly.
-    # (pyscript state.getattr() returns the full attributes dict — no 2-arg form)
-    sched_state = state.get(SCHEDULE_ENT)
-    schedule = []
-    if sched_state and sched_state not in ("unknown", "unavailable", "[]", ""):
-        try:
-            schedule = json.loads(sched_state)
-        except Exception:
-            schedule = []
+    # Always read fresh from sensor state — never use a cached value.
+    schedule = get_schedule()
 
     if not isinstance(schedule, list) or len(schedule) == 0:
         log.info("ev_control_loop: Priority step 5: no schedule available")
