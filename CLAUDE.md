@@ -350,6 +350,10 @@ ssh pi@[YOUR_HA_HOST] "docker restart homeassistant"
 **Set a test deadline 2 hours from now and 5 kWh target:**
 Developer Tools → States → set `input_datetime.ev_deadline` to a time 2h from now, set `input_number.ev_required_kwh` to 5.0, then trigger recompute. Check `sensor.ev_schedule` for windows.
 
+35. **Mercedes PHEV minimum charge current is 10A (2026-04-27)**: The car terminates the charging session if the current limit falls below approximately 10A (6.93 kW on 3-phase 400V). `CHARGER_MIN_AMPS = 10` (was 6). `_apply_tariff_current()` computes `raw_amps = int(max_kw × 1000 / (400 × 1.732))` and checks `raw_amps < CHARGER_MIN_AMPS` before calling `set_charge_current()`: if the configured tariff power would produce fewer than 10A, it logs a warning, calls `reset_to_full_current()`, and returns — leaving ON/OFF control (via the consumption guard) to handle the cap. `set_charge_current()` itself also clamps to `[CHARGER_MIN_AMPS, CIRCUIT_MAX_AMPS]` as a second line of defence, but the pre-check is required to avoid calling `set_charge_current(4)` which would silently clamp to 10A instead of triggering the ON/OFF fallback path.
+
+36. **`_apply_tariff_current()` is called on fresh start only, never mid-session (2026-04-27)**: Adjusting the current limit on an already-charging session causes the Mercedes PHEV to terminate the session (Zaptec firmware re-negotiates, car sees the new lower limit and ends the session). `set_charger()` calls `_apply_tariff_current()` only in the `on != current` branch (fresh start), with a `task.sleep(2)` guard before the call to give Zaptec time to transition from `connected_requesting` → `connected_charging` before the current write is sent. The `else` branch (`on == current`, charger already ON) no longer calls `_apply_tariff_current()` at all — tariff-hour boundary transitions are handled by the next fresh start cycle.
+
 ## Future Work
 
 - **Load balancing**: Read `sensor.tibber_pulse_dianavagen_15_power` (house power) and reduce charging current via `zaptec.limit_current` when house load is high, to stay within fuse limits.

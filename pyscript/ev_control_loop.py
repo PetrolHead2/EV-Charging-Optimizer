@@ -64,7 +64,7 @@ CHARGER_MAX_CURRENT_ENT = "number.laddbox_charger_max_current"
 
 # ── Electrical constants — Zaptec GO, 3-phase TN, 400 V, 25 A circuit ─────────
 CIRCUIT_MAX_AMPS = 25
-CHARGER_MIN_AMPS = 6     # Zaptec GO will not charge below this value
+CHARGER_MIN_AMPS = 10    # Mercedes PHEV minimum — car terminates session below this
 PHASE_VOLTAGE    = 400   # line-to-line voltage (V)
 PHASE_FACTOR     = 1.732 # sqrt(3) for 3-phase: P = sqrt(3) × V × I
 
@@ -157,12 +157,24 @@ def _apply_tariff_current():
         return
 
     # Inside tariff hours — throttle to configured kW limit
-    max_kw = float(state.get(MAX_TARIFF_KW_ENT) or 3.0)
-    amps   = int(max_kw * 1000 / (PHASE_VOLTAGE * PHASE_FACTOR))
-    set_charge_current(amps)   # clamps to [CHARGER_MIN_AMPS, CIRCUIT_MAX_AMPS]
+    max_kw   = float(state.get(MAX_TARIFF_KW_ENT) or 3.0)
+    raw_amps = int(max_kw * 1000 / (PHASE_VOLTAGE * PHASE_FACTOR))
+
+    if raw_amps < CHARGER_MIN_AMPS:
+        # Configured tariff power is too low for the car to accept.
+        # Fall back to ON/OFF control — consumption guard handles the cap.
+        log.warning(
+            f"ev_control_loop: Tariff limit {max_kw:.1f} kW = {raw_amps}A is below "
+            f"car minimum {CHARGER_MIN_AMPS}A. Using ON/OFF control instead — "
+            f"consumption guard handles the cap."
+        )
+        reset_to_full_current()
+        return
+
+    set_charge_current(raw_amps)   # clamps to [CHARGER_MIN_AMPS, CIRCUIT_MAX_AMPS]
+    clamped = max(CHARGER_MIN_AMPS, min(raw_amps, CIRCUIT_MAX_AMPS))
     log.info(
-        f"ev_control_loop: Tariff limiting: {max_kw:.1f} kW → "
-        f"{max(CHARGER_MIN_AMPS, min(int(amps), CIRCUIT_MAX_AMPS))}A "
+        f"ev_control_loop: Tariff limiting: {max_kw:.1f} kW → {clamped}A "
         f"(3-phase {PHASE_VOLTAGE}V, tariff hours)"
     )
 
@@ -313,6 +325,11 @@ def set_charger(on, reason):
             switch.turn_on(entity_id=SWITCH_ENT)
             log.info(f"ev_control_loop: STARTED charging — {reason}")
 
+            # Give Zaptec time to transition from Waiting → connected_charging
+            # before setting current limit, to avoid a race condition where the
+            # current write is ignored or overridden by the charger firmware.
+            task.sleep(2)
+
             # Apply tariff current limit (or restore full power outside tariff hours)
             _apply_tariff_current()
 
@@ -331,10 +348,10 @@ def set_charger(on, reason):
         log.debug(
             f"ev_control_loop: charger already {'ON' if on else 'OFF'} — no action"
         )
-        # Apply (or restore) current limit even when state unchanged,
-        # to handle tariff-hour boundary transitions.
-        if on:
-            _apply_tariff_current()
+        # Do NOT call _apply_tariff_current() here — adjusting current on an
+        # already-charging session can cause the Mercedes PHEV to terminate the
+        # session if the new value falls below the car's minimum acceptance threshold.
+        # Tariff limiting is applied only on fresh start (on != current branch above).
 
     # Always update reason text so UI reflects current decision
     input_text.set_value(entity_id=REASON_ENT, value=reason[:255])
