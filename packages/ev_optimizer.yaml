@@ -140,7 +140,7 @@ template:
 
 automation:
   # 1. Stop when the required energy target is reached
-  - id: ev_safety_target_reached
+  - id: "1745760001"
     alias: "EV safety – target energy reached"
     description: >
       Hard-stops the charger when ev_remaining_kwh drops below 0.2 kWh,
@@ -172,7 +172,7 @@ automation:
     mode: single
 
   # 2. Stop when the manual departure deadline has passed
-  - id: ev_safety_manual_deadline_passed
+  - id: "1745760002"
     alias: "EV safety – manual deadline passed"
     description: >
       Fires once when now() passes a manually-set ev_deadline.
@@ -205,7 +205,7 @@ automation:
     mode: single
 
   # 3b. Stop when the auto-computed departure deadline has passed
-  - id: ev_safety_auto_deadline_passed
+  - id: "1745760003"
     alias: "EV safety – auto deadline passed"
     description: >
       Fires once when now() passes the pyscript-computed ev_computed_deadline.
@@ -229,7 +229,7 @@ automation:
     mode: single
 
   # 4. Stop when Nordpool price data becomes unavailable
-  - id: ev_safety_no_price_data
+  - id: "1745760004"
     alias: "EV safety – Nordpool unavailable"
     description: >
       Hard-stops the charger if the Nordpool price sensor goes unavailable.
