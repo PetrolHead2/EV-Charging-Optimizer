@@ -28,13 +28,18 @@ Triggers:
   on_zaptec_state_changed()    — @state_trigger sensor.laddbox_charger_mode
                                   (fires on connect, charging, finished, disconnect)
 
-Priority chain (first match wins):
-  1. Mode="Stop"         → always OFF, no exceptions
-  2. Mode="Charge now"   → always ON,  no exceptions
-  3. Deadline pressure   → always ON,  bypasses hysteresis + consumption guard
-  4. No schedule         → stop only if currently charging, else log + return
-  5. In window           → ON  (subject to hysteresis + consumption guard)
-  6. Outside window      → OFF (subject to hysteresis)
+Priority chain (evaluated top-to-bottom):
+  1. Mode="Stop"          → always OFF, no exceptions
+  2. Mode="Charge now"    → always ON,  no exceptions
+  3. Deadline pressure    → set forced_on flag, do NOT return yet
+  4. Consumption guard    → ALWAYS runs, even during deadline pressure
+                            price-aware latest-start algorithm:
+                            if should_hold + forced_on → OFF + combined reason
+                            if should_hold only        → OFF + guard reason
+  5. No schedule          → if forced_on: force ON; else safe OFF
+  6. Deadline pressure    → force ON with hysteresis (guard already cleared)
+  7. In window            → ON  (subject to hysteresis)
+  8. Outside window       → OFF (subject to hysteresis)
 """
 
 import json
@@ -376,6 +381,181 @@ def set_charger(on, reason):
     input_text.set_value(entity_id=REASON_ENT, value=reason[:255])
 
 
+# ── Price-aware consumption guard helpers ─────────────────────────────────────
+
+def get_slot_price(dt):
+    """
+    Return the Nordpool SEK/kWh price for the 15-minute slot that contains dt.
+    Returns None if price data is unavailable or dt is outside the known range.
+
+    Uses raw_today + raw_tomorrow attributes from the Nordpool sensor which
+    contain 15-min slot dicts with 'start', 'end', and 'value' keys.
+    """
+    try:
+        attrs        = state.getattr(PRICE_ENT) or {}
+        raw_today    = attrs.get("raw_today")    or []
+        raw_tomorrow = attrs.get("raw_tomorrow") or []
+        all_slots    = raw_today + raw_tomorrow
+
+        dt_utc = dt.astimezone(timezone.utc)
+
+        for slot in all_slots:
+            start_raw  = slot["start"]
+            end_raw    = slot["end"]
+            slot_start = (datetime.fromisoformat(start_raw) if isinstance(start_raw, str) else start_raw).astimezone(timezone.utc)
+            slot_end   = (datetime.fromisoformat(end_raw)   if isinstance(end_raw,   str) else end_raw).astimezone(timezone.utc)
+            if slot_start <= dt_utc < slot_end:
+                return float(slot["value"])
+        return None
+    except Exception as exc:
+        log.warning(f"ev_control_loop: get_slot_price: failed: {exc}")
+        return None
+
+
+def check_consumption_guard():
+    """
+    Price-aware consumption guard using a latest-start calculation.
+
+    Replaces the old projection-based guard that fired immediately when the
+    projected kWh exceeded the cap.  The new algorithm never stops charging
+    unnecessarily early and optimises across hour boundaries using Nordpool prices.
+
+    Algorithm:
+      1. headroom = cap - accumulated_this_hour
+      2. If headroom <= 0: hold until next hour (cap already reached).
+      3. max_charge_minutes = headroom / (house_kw + ev_kw) × 60
+      4. latest_start_minute = 60 - max_charge_minutes
+         (start this late and you finish exactly at the hour boundary)
+      5. If now >= latest_start: allow charging (within the optimal window).
+      6. If now < latest_start: compare current vs next-hour Nordpool price.
+         - next_price >= current_price × 0.95 (same or more expensive):
+             hold until latest_start (use cheaper current-hour price).
+         - next_price < current_price × 0.95 (clearly cheaper next hour):
+             skip to next hour entirely — optimizer will pick cheap slots.
+
+    Always applies during tariff hours (06:00–22:00) when guard is enabled.
+    Fail-open when Tibber sensors are unavailable.
+
+    Returns:
+        (should_hold: bool, reason: str, resume_at: datetime | None)
+    """
+    local_tz   = ZoneInfo(hass.config.time_zone)
+    now_dt     = datetime.now(tz=local_tz)
+    local_hour = now_dt.hour
+
+    # Outside tariff hours — guard does not apply
+    if not (TARIFF_HOUR_START <= local_hour < TARIFF_HOUR_END):
+        return False, "", None
+
+    # Guard disabled by user
+    if (state.get(GUARD_ENT) or "off") != "on":
+        return False, "", None
+
+    # Read Tibber sensors — fail-open if unavailable
+    accum_raw = state.get(TIBBER_ACCUM_ENT)
+    avg_w_raw = state.get(TIBBER_AVG_W_ENT)
+
+    if accum_raw in (None, "unknown", "unavailable") or \
+       avg_w_raw  in (None, "unknown", "unavailable"):
+        log.warning(
+            "ev_control_loop: Consumption guard: Tibber sensor(s) "
+            "unavailable — skipping (fail-open)"
+        )
+        return False, "", None
+
+    accumulated_kwh   = float(accum_raw)
+    current_house_kw  = float(avg_w_raw) / 1000
+    charging_power_kw = float(state.get(CHARGE_PWR_ENT) or 7.0)
+    threshold         = float(state.get(MAX_KWH_ENT)    or 5.0)
+
+    # Step 1 — headroom remaining in this hour
+    headroom_kwh = threshold - accumulated_kwh
+
+    # Step 2 — cap already reached: hold until next hour
+    if headroom_kwh <= 0:
+        next_hour_dt = (
+            now_dt.replace(minute=0, second=0, microsecond=0)
+            + timedelta(hours=1)
+        )
+        reason = (
+            f"Consumption guard: hourly cap reached "
+            f"({accumulated_kwh:.2f}/{threshold:.1f} kWh) — "
+            f"holding until {next_hour_dt.strftime('%H:%M')}"
+        )
+        log.info(f"ev_control_loop: {reason}")
+        return True, reason, next_hour_dt
+
+    # Step 3 — max minutes the EV can charge before hitting the cap
+    total_load_kw      = current_house_kw + charging_power_kw
+    max_charge_minutes = (headroom_kwh / total_load_kw) * 60.0
+
+    # Step 4 — latest start: charge from here to end of hour, exactly fits cap
+    latest_start_minute = 60.0 - max_charge_minutes
+    latest_start_dt = (
+        now_dt.replace(minute=0, second=0, microsecond=0)
+        + timedelta(minutes=latest_start_minute)
+    )
+    current_minute_float = now_dt.minute + (now_dt.second / 60.0)
+
+    log.info(
+        f"ev_control_loop: Consumption guard: "
+        f"accumulated={accumulated_kwh:.2f} kWh "
+        f"headroom={headroom_kwh:.2f} kWh "
+        f"house={current_house_kw:.2f} kW "
+        f"ev={charging_power_kw:.2f} kW "
+        f"max_charge={max_charge_minutes:.1f} min "
+        f"latest_start={latest_start_dt.strftime('%H:%M:%S')}"
+    )
+
+    # Step 5 — already past latest_start: charge now, within optimal window
+    if current_minute_float >= latest_start_minute:
+        log.info(
+            "ev_control_loop: Consumption guard: OK — "
+            "within optimal charging window for this hour"
+        )
+        return False, "", None
+
+    # Step 6 — too early; compare current vs next-hour price
+    current_price = get_slot_price(now_dt)
+    next_hour_dt  = (
+        now_dt.replace(minute=0, second=0, microsecond=0)
+        + timedelta(hours=1)
+    )
+    next_price = get_slot_price(next_hour_dt)
+
+    log.info(
+        f"ev_control_loop: Consumption guard: price comparison — "
+        f"current={current_price} SEK/kWh "
+        f"next_hour={next_price} SEK/kWh "
+        f"threshold=5%"
+    )
+
+    if next_price is None or current_price is None or \
+       next_price >= current_price * 0.95:
+        # Price data missing, or current hour is same price / cheaper than next.
+        # Wait until latest_start so we use the cheap current-hour price.
+        wait_minutes = max(0, int(latest_start_minute - current_minute_float))
+        cp_str = f"{current_price:.3f}" if current_price is not None else "unknown"
+        reason = (
+            f"Consumption guard: holding OFF — "
+            f"optimal start at {latest_start_dt.strftime('%H:%M')} "
+            f"in ~{wait_minutes} min "
+            f"(headroom {headroom_kwh:.2f} kWh = {max_charge_minutes:.0f} min "
+            f"at {charging_power_kw:.1f} kW, "
+            f"price {cp_str} SEK/kWh)"
+        )
+        return True, reason, latest_start_dt
+
+    # Next hour is clearly cheaper (>5%): skip to next hour entirely.
+    reason = (
+        f"Consumption guard: skipping to next hour — "
+        f"cheaper ({next_price:.3f} vs {current_price:.3f} SEK/kWh, "
+        f">5% saving) — resuming at {next_hour_dt.strftime('%H:%M')}"
+    )
+    log.info(f"ev_control_loop: {reason}")
+    return True, reason, next_hour_dt
+
+
 # ── Main control loop ──────────────────────────────────────────────────────────
 
 def ev_control_loop():
@@ -385,17 +565,19 @@ def ev_control_loop():
     Called by ev_control_loop_tick() (5-min schedule + startup) and by
     on_zaptec_state_changed() (immediately on any charger state transition).
 
-    Priority chain (evaluated top-to-bottom, first match wins — no fall-through):
+    Priority chain (evaluated top-to-bottom):
 
     0. Car not connected      → update reason, return immediately; no switch calls
     1. Mode = "Stop"          → always OFF — no exceptions, no hysteresis
     2. Mode = "Charge now"    → always ON  — no exceptions, no hysteresis
-    3. Deadline pressure ON   → always ON  — bypasses hysteresis, schedule check,
-                                             and consumption guard
-    4. No schedule available  → stop ONLY if charger is currently charging
-                                (avoid unnecessary toggles when already off)
-    5. Inside scheduled window  → ON  (subject to hysteresis + consumption guard)
-    6. Outside scheduled window → OFF (subject to hysteresis)
+    3. Deadline pressure      → set forced_on flag — do NOT return yet
+    4. Consumption guard      → ALWAYS runs (even with deadline pressure)
+                                price-aware latest-start: if should_hold + forced_on
+                                → OFF with combined reason; else → OFF with guard reason
+    5. No schedule available  → if forced_on: force ON; else safe OFF
+    6. Deadline pressure      → force ON — guard cleared at step 4, hysteresis applies
+    7. Inside scheduled window  → ON  (subject to hysteresis)
+    8. Outside scheduled window → OFF (subject to hysteresis)
     """
     # ── Step 0: Connection guard — no car, no switch calls ────────────────────
     # switch.laddbox_charging is unavailable when no car is connected.
@@ -444,30 +626,65 @@ def ev_control_loop():
         set_charger(True, "Manual override: Charge now")
         return
 
-    # ── Step 3: Deadline pressure — force ON, bypass hysteresis ───────────────
-    # ev_deadline_pressure is True when slots_available <= slots_needed + 1,
-    # meaning we cannot afford to wait for the next hysteresis window.
-    # set_charger() skips the switch call if already charging — no spurious toggles.
-    pressure = state.get(PRESSURE_ENT) or "off"
-    if pressure == "on":
+    # ── Step 3: Deadline pressure — set flag, do NOT return yet ─────────────────
+    # The consumption guard at step 4 must run even when deadline pressure is
+    # active — the guard may legitimately need to hold off charging (e.g. hourly
+    # cap already nearly full). A combined reason message informs the user.
+    pressure  = state.get(PRESSURE_ENT) or "off"
+    forced_on = (pressure == "on")
+    slots_needed = 0
+    slots_avail  = 0
+    if forced_on:
         sn_raw = state.get(SLOTS_NEEDED_ENT)
         sa_raw = state.get(SLOTS_AVAIL_ENT)
         slots_needed = int(sn_raw) if sn_raw not in (None, "unknown", "unavailable") else 0
         slots_avail  = int(sa_raw) if sa_raw not in (None, "unknown", "unavailable") else 0
-        reason = (
-            f"Deadline pressure: forced ON "
+        log.info(
+            f"ev_control_loop: Priority step 3: deadline pressure active "
             f"({slots_avail} slots available, {slots_needed} needed)"
         )
-        log.info(
-            f"ev_control_loop: Priority step 3: deadline pressure → ON "
-            f"({slots_avail} slots avail, {slots_needed} needed) — bypassing hysteresis"
-        )
-        set_charger(True, reason)
+    else:
+        log.info("ev_control_loop: Priority step 3: no deadline pressure")
+
+    # ── Step 4: Consumption guard — always runs, even during deadline pressure ──
+    # Price-aware latest-start: calculates the optimal window end-of-hour and
+    # compares current vs next-hour Nordpool price to decide whether to wait
+    # in this hour or skip to the next. Fail-open when Tibber is unavailable.
+    should_hold, guard_reason, resume_at = check_consumption_guard()
+
+    if should_hold:
+        if forced_on:
+            local_tz_now = ZoneInfo(hass.config.time_zone)
+            now_ts = datetime.now(tz=local_tz_now).timestamp()
+            if resume_at:
+                wait_mins = max(0, int((resume_at.timestamp() - now_ts) / 60))
+                combined_reason = (
+                    f"Deadline pressure active — "
+                    f"consumption guard holding OFF for ~{wait_mins} min | "
+                    f"{guard_reason}"
+                )
+            else:
+                combined_reason = (
+                    f"Deadline pressure active — "
+                    f"consumption guard holding OFF | "
+                    f"{guard_reason}"
+                )
+            log.info(
+                f"ev_control_loop: Priority step 4: "
+                f"guard holds despite deadline — {combined_reason}"
+            )
+            set_charger(False, combined_reason[:255])
+        else:
+            log.info(
+                f"ev_control_loop: Priority step 4: "
+                f"consumption guard holding — {guard_reason}"
+            )
+            set_charger(False, guard_reason[:255])
         return
 
-    log.info("ev_control_loop: Priority step 3: no deadline pressure")
+    log.info("ev_control_loop: Priority step 4: consumption guard OK — charging allowed")
 
-    # ── Step 4: No schedule — safe default, stop only if currently charging ───
+    # ── Step 5: No schedule — safe default ────────────────────────────────────
     # sensor.ev_schedule state IS the JSON string; parse it directly.
     # (pyscript state.getattr() returns the full attributes dict — no 2-arg form)
     sched_state = state.get(SCHEDULE_ENT)
@@ -479,7 +696,14 @@ def ev_control_loop():
             schedule = []
 
     if not isinstance(schedule, list) or len(schedule) == 0:
-        log.info("ev_control_loop: Priority step 4: no schedule available")
+        log.info("ev_control_loop: Priority step 5: no schedule available")
+        if forced_on:
+            pressure_reason = (
+                f"Deadline pressure: forced ON — no schedule "
+                f"({slots_avail} slots available, {slots_needed} needed)"
+            )
+            set_charger(True, pressure_reason)
+            return
         if _is_charging():
             set_charger(False, "No schedule available — stopping unauthorised charge")
         else:
@@ -490,7 +714,31 @@ def ev_control_loop():
             log.debug("ev_control_loop: no schedule, charger already off — no action")
         return
 
-    # ── Steps 5 & 6: Evaluate schedule ────────────────────────────────────────
+    # ── Step 6: Deadline pressure — force ON (consumption guard cleared) ──────
+    # Consumption guard passed at step 4, so it is safe to start charging.
+    # Hysteresis still applies to avoid rapid toggling.
+    if forced_on:
+        pressure_reason = (
+            f"Deadline pressure: forced ON "
+            f"({slots_avail} slots available, {slots_needed} needed)"
+        )
+        log.info(
+            f"ev_control_loop: Priority step 6: deadline pressure → ON "
+            f"({slots_avail} slots avail, {slots_needed} needed)"
+        )
+        if not check_hysteresis(True):
+            current_on  = _is_charging()
+            hold_reason = (
+                f"Hysteresis: holding {'ON' if current_on else 'OFF'} "
+                f"(min {HYSTERESIS_MINUTES} min) | {pressure_reason}"
+            )
+            input_text.set_value(entity_id=REASON_ENT, value=hold_reason[:255])
+            log.debug(f"ev_control_loop: {hold_reason}")
+            return
+        set_charger(True, pressure_reason)
+        return
+
+    # ── Steps 7 & 8: Normal schedule following ─────────────────────────────────
     desired   = should_charge_now(schedule)
     price_str = _current_price_str()
 
@@ -500,7 +748,7 @@ def ev_control_loop():
     dl_ts       = sched_attrs.get("deadline_ts")
 
     log.info(
-        f"ev_control_loop: Priority step {'5' if desired else '6'}: "
+        f"ev_control_loop: Priority step {'7' if desired else '8'}: "
         f"should_charge_now={desired} → {'ON' if desired else 'OFF'}"
     )
     if desired:
@@ -515,7 +763,7 @@ def ev_control_loop():
         else:
             reason = f"Outside scheduled windows ({price_str})"
 
-    # ── Hysteresis guard (steps 5 & 6 only — deadline pressure already returned) ──
+    # ── Hysteresis guard (steps 7 & 8 only) ───────────────────────────────────
     if not check_hysteresis(desired):
         current_on  = _is_charging()
         hold_reason = (
@@ -525,86 +773,6 @@ def ev_control_loop():
         input_text.set_value(entity_id=REASON_ENT, value=hold_reason[:255])
         log.debug(f"ev_control_loop: {hold_reason}")
         return
-
-    # ── Consumption guard (only when schedule says charge, tariff hours only) ──
-    if desired:
-        local_tz   = ZoneInfo(hass.config.time_zone)
-        local_now  = datetime.now(tz=local_tz)
-        local_hour = local_now.hour
-
-        guard_enabled = (state.get(GUARD_ENT) or "off") == "on"
-
-        if not guard_enabled:
-            log.debug("ev_control_loop: Consumption guard: disabled by user")
-
-        elif local_hour < TARIFF_HOUR_START or local_hour >= TARIFF_HOUR_END:
-            log.debug("ev_control_loop: Consumption guard: outside tariff hours")
-
-        else:
-            # ── Cooldown check — guard fired earlier this hour ─────────────────
-            # Prevents the toggle loop where guard stops charging, then the next
-            # 5-minute tick restarts it (because the schedule window is still active),
-            # only to have the guard fire again and stop it again.
-            if (state.get(GUARD_COOLDOWN_ENT) or "off") == "on":
-                log.debug(
-                    "ev_control_loop: Consumption guard: cooldown active, "
-                    "holding OFF until next hour"
-                )
-                set_charger(
-                    False,
-                    "Consumption guard: holding OFF until next hour boundary",
-                )
-                return
-
-            accum_raw = state.get(TIBBER_ACCUM_ENT)
-            avg_w_raw = state.get(TIBBER_AVG_W_ENT)
-
-            if accum_raw in (None, "unknown", "unavailable") or \
-               avg_w_raw  in (None, "unknown", "unavailable"):
-                log.warning(
-                    "ev_control_loop: Consumption guard: Tibber sensor(s) "
-                    "offline, skipping guard — fail-open"
-                )
-            else:
-                accumulated_kwh   = float(accum_raw)
-                average_power_w   = float(avg_w_raw)
-                current_house_kw  = average_power_w / 1000
-                charging_power_kw = float(state.get(CHARGE_PWR_ENT) or 7.0)
-                threshold         = float(state.get(MAX_KWH_ENT) or 5.0)
-
-                remaining_minutes = 60 - local_now.minute
-                projected_total   = accumulated_kwh + (
-                    (current_house_kw + charging_power_kw) * (remaining_minutes / 60)
-                )
-
-                if projected_total > threshold:
-                    guard_reason = (
-                        f"Consumption guard: house {current_house_kw:.1f} kW "
-                        f"+ EV {charging_power_kw:.1f} kW = projected "
-                        f"{projected_total:.1f} kWh this hour "
-                        f"(cap {threshold:.1f} kWh)"
-                    )
-                    set_charger(False, guard_reason)
-
-                    # Activate cooldown until start of next hour.
-                    # Any invocation that sees cooldown=on will stop charging and
-                    # return immediately — no toggle loop.
-                    now2 = datetime.now(tz=local_tz)
-                    seconds_to_next_hour = (60 - now2.minute) * 60 - now2.second
-                    input_boolean.turn_on(entity_id=GUARD_COOLDOWN_ENT)
-                    log.info(
-                        f"ev_control_loop: Consumption guard: cooldown active for "
-                        f"{seconds_to_next_hour}s until next hour"
-                    )
-                    task.sleep(seconds_to_next_hour + 5)
-                    input_boolean.turn_off(entity_id=GUARD_COOLDOWN_ENT)
-                    log.info("ev_control_loop: Consumption guard: cooldown cleared")
-                    return
-
-                log.debug(
-                    f"ev_control_loop: Consumption guard: OK — projected "
-                    f"{projected_total:.1f} kWh under cap {threshold:.1f}"
-                )
 
     # ── Act ───────────────────────────────────────────────────────────────────
     set_charger(desired, reason)
