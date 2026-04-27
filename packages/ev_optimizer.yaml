@@ -132,13 +132,18 @@ template:
         device_class: problem
         icon: mdi:alert-circle-outline
         state: >
-          {%- set available = states('sensor.ev_slots_available') | int(999) -%}
-          {%- set needed = states('sensor.ev_slots_needed') | int(0) -%}
-          {%- if available >= 999 -%}
-            false
-          {%- else -%}
-            {{ available <= (needed + 1) }}
-          {%- endif -%}
+          {%- set slots_needed = states('sensor.ev_slots_needed') | int(0) -%}
+          {%- set slots_available = states('sensor.ev_slots_available') | int(999) -%}
+          {%- set auto_deadline_set = state_attr(
+               'input_datetime.ev_computed_deadline', 'timestamp') | float(0)
+               > now().timestamp() + 300 -%}
+          {%- set man_deadline_set = state_attr(
+               'input_datetime.ev_deadline', 'timestamp') | float(0)
+               > now().timestamp() + 300 -%}
+          {%- set any_deadline = auto_deadline_set or man_deadline_set -%}
+          {{ any_deadline
+             and slots_needed > 0
+             and slots_available <= (slots_needed + 1) }}
 
 # ── Safety Automations ─────────────────────────────────────────────────────────
 # These run independently of the pyscript control loop as a hard-stop backstop.

@@ -140,7 +140,7 @@ input_text:
 | `sensor.ev_remaining_kwh` | kWh still needed to reach target | kWh |
 | `sensor.ev_slots_needed` | 15-min slots needed to deliver remaining kWh | slots |
 | `sensor.ev_slots_available` | 15-min slots until deadline (999 if no deadline) | slots |
-| `binary_sensor.ev_deadline_pressure` | True when slots_available <= slots_needed + 1 | — |
+| `binary_sensor.ev_deadline_pressure` | True when deadline set AND slots_needed > 0 AND slots_available <= slots_needed + 1 | — |
 
 ### Optimizer Output
 
@@ -355,6 +355,8 @@ Developer Tools → States → set `input_datetime.ev_deadline` to a time 2h fro
 37. **Consumption guard cooldown prevents toggle loop (2026-04-27)**: When the consumption guard fires (projected hourly kWh exceeds cap), it stops charging and sets `input_boolean.ev_consumption_guard_active = on`. Subsequent control loop ticks see the flag and hold charging OFF for the remainder of the hour without re-evaluating the projection. The primary reset is a `task.sleep(seconds_to_next_hour + 5)` inside `ev_control_loop()` that clears the boolean at the next hour boundary. A `@time_trigger("period(now, 1h)")` function `reset_consumption_guard_hourly` provides a backup reset in case HA restarts during the sleep and kills the waiting coroutine. The cooldown flag is visible in the Lovelace dashboard under the Tariff protection section. Without this fix, the control loop would restart charging on each 5-minute tick (because the schedule window is still active), the guard would fire again, stop it, and the cycle would repeat — toggling the charger 12 times per hour.
 
 36. **`_apply_tariff_current()` is called on fresh start only, never mid-session (2026-04-27)**: Adjusting the current limit on an already-charging session causes the Mercedes PHEV to terminate the session (Zaptec firmware re-negotiates, car sees the new lower limit and ends the session). `set_charger()` calls `_apply_tariff_current()` only in the `on != current` branch (fresh start), with a `task.sleep(2)` guard before the call to give Zaptec time to transition from `connected_requesting` → `connected_charging` before the current write is sent. The `else` branch (`on == current`, charger already ON) no longer calls `_apply_tariff_current()` at all — tariff-hour boundary transitions are handled by the next fresh start cycle.
+
+38. **`binary_sensor.ev_deadline_pressure` reads from template sensors, not raw entities (2026-04-27)**: The binary sensor reads `sensor.ev_slots_needed` and `sensor.ev_slots_available` rather than recalculating from `ev_remaining_kwh` directly. This means any fix to `sensor.ev_slots_needed` (e.g. the tariff-power-aware calculation) automatically flows through to deadline pressure. The sensor also guards `slots_needed > 0` (no pressure when battery is already full or no target) and checks that a future deadline actually exists via `ev_computed_deadline` or `ev_deadline` timestamp > now + 300s. Root cause of the 172-slots bug: the old `ev_slots_needed` template used `ev_max_tariff_power_kw` directly as the charging power during tariff hours; when that entity was transiently set to a low value (e.g. 0.057 kW) the slots calculation exploded. Fixed by the tariff-throttling guard in the template and by the 0 = disabled logic.
 
 ## Future Work
 

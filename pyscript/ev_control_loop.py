@@ -450,8 +450,10 @@ def ev_control_loop():
     # set_charger() skips the switch call if already charging — no spurious toggles.
     pressure = state.get(PRESSURE_ENT) or "off"
     if pressure == "on":
-        slots_avail  = state.get(SLOTS_AVAIL_ENT)  or "?"
-        slots_needed = state.get(SLOTS_NEEDED_ENT) or "?"
+        sn_raw = state.get(SLOTS_NEEDED_ENT)
+        sa_raw = state.get(SLOTS_AVAIL_ENT)
+        slots_needed = int(sn_raw) if sn_raw not in (None, "unknown", "unavailable") else 0
+        slots_avail  = int(sa_raw) if sa_raw not in (None, "unknown", "unavailable") else 0
         reason = (
             f"Deadline pressure: forced ON "
             f"({slots_avail} slots available, {slots_needed} needed)"
