@@ -138,19 +138,26 @@ def _is_charging():
 
 def _apply_tariff_current():
     """
-    Apply or restore the session current limit based on tariff-hour rules.
+    Apply tariff hour current throttling if configured.
 
-    Inside tariff hours (06:00–22:00 local) with guard enabled:
-      throttle to input_number.ev_max_tariff_power_kw via set_charge_current().
-    Otherwise: restore to CIRCUIT_MAX_AMPS via reset_to_full_current().
+    If ev_max_tariff_power_kw == 0: throttling is disabled for this
+    installation.  Protection during tariff hours comes from:
+      1. Optimizer scheduling only the cheapest slots.
+      2. Tibber consumption guard stopping charging when the projected
+         hourly kWh would exceed ev_max_hourly_kwh.
+
+    If ev_max_tariff_power_kw > 0 but the resulting amps would fall
+    below CHARGER_MIN_AMPS (10 A for the Mercedes PHEV), the throttle
+    is also disabled and ON/OFF control is used instead.
 
     Only touches number.laddbox_charger_max_current — never the installation.
     """
     local_tz   = ZoneInfo(hass.config.time_zone)
     local_hour = datetime.now(tz=local_tz).hour
     guard_on   = (state.get(GUARD_ENT) or "off") == "on"
+    tariff_active = TARIFF_HOUR_START <= local_hour < TARIFF_HOUR_END
 
-    if not guard_on or local_hour < TARIFF_HOUR_START or local_hour >= TARIFF_HOUR_END:
+    if not (tariff_active and guard_on):
         reset_to_full_current()
         if not guard_on:
             log.debug("ev_control_loop: Tariff limiting: guard disabled — full power")
@@ -158,8 +165,19 @@ def _apply_tariff_current():
             log.debug("ev_control_loop: Tariff limiting: outside tariff hours — full power")
         return
 
-    # Inside tariff hours — throttle to configured kW limit
-    max_kw   = float(state.get(MAX_TARIFF_KW_ENT) or 3.0)
+    # Inside tariff hours with guard on — check configured kW limit
+    max_kw = float(state.get(MAX_TARIFF_KW_ENT) or 0.0)
+
+    if max_kw == 0:
+        # 0 = current throttling disabled for this installation.
+        # Rely on consumption guard + ON/OFF scheduling only.
+        log.debug(
+            "ev_control_loop: Tariff limiting: disabled (0 kW configured) "
+            "— using ON/OFF + consumption guard only"
+        )
+        reset_to_full_current()
+        return
+
     raw_amps = int(max_kw * 1000 / (PHASE_VOLTAGE * PHASE_FACTOR))
 
     if raw_amps < CHARGER_MIN_AMPS:
@@ -167,8 +185,7 @@ def _apply_tariff_current():
         # Fall back to ON/OFF control — consumption guard handles the cap.
         log.warning(
             f"ev_control_loop: Tariff limit {max_kw:.1f} kW = {raw_amps}A is below "
-            f"car minimum {CHARGER_MIN_AMPS}A. Using ON/OFF control instead — "
-            f"consumption guard handles the cap."
+            f"car minimum {CHARGER_MIN_AMPS}A — throttling disabled, using ON/OFF only"
         )
         reset_to_full_current()
         return

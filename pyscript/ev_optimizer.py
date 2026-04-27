@@ -109,20 +109,31 @@ def _build_slots():
 def effective_power_kw(slot_start):
     """
     Returns the effective charging power in kW for a given slot start time,
-    accounting for tariff hour limiting.
+    accounting for tariff hour current throttling.
 
     slot_start must be a timezone-aware datetime object.
+
+    When ev_max_tariff_power_kw == 0, current throttling is disabled and
+    the full charging power is used for all slots regardless of time of day.
+    When ev_max_tariff_power_kw > 0 but the resulting amps would be below
+    CHARGER_MIN_AMPS (10 A), throttling is also treated as disabled.
     """
     local_hour    = slot_start.astimezone(ZoneInfo(hass.config.time_zone)).hour
     tariff_active = (local_hour >= TARIFF_HOUR_START and local_hour < TARIFF_HOUR_END)
     guard_enabled = (state.get(GUARD_ENT) or "off") == "on"
 
     if tariff_active and guard_enabled:
-        raw = state.get(MAX_TARIFF_KW_ENT)
-        return float(raw) if raw not in (None, 'unknown', 'unavailable') else 3.0
-    else:
-        raw = state.get(CHARGE_PWR_ENT)
-        return float(raw) if raw not in (None, 'unknown', 'unavailable') else CHARGER_KW
+        raw_kw = state.get(MAX_TARIFF_KW_ENT)
+        max_kw = float(raw_kw) if raw_kw not in (None, 'unknown', 'unavailable') else 0.0
+        if max_kw > 0:
+            # Check that configured power is above the car's minimum current threshold
+            raw_amps = int(max_kw * 1000 / (400 * 1.732))
+            if raw_amps >= 10:   # CHARGER_MIN_AMPS for Mercedes PHEV
+                return max_kw
+        # 0 kW configured, or below car minimum — throttling disabled, use full power
+
+    raw = state.get(CHARGE_PWR_ENT)
+    return float(raw) if raw not in (None, 'unknown', 'unavailable') else CHARGER_KW
 
 
 def get_next_departure():

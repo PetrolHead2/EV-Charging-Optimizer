@@ -25,11 +25,11 @@ input_number:
     unit_of_measurement: kWh
     icon: mdi:gauge
   ev_max_tariff_power_kw:
-    name: "EV max charge power during tariff hours"
+    name: "EV tariff power limit (0 = disabled)"
     min: 0
     max: 11
     step: 0.5
-    initial: 3.0
+    initial: 0
     unit_of_measurement: kW
     icon: mdi:current-ac
 
@@ -97,8 +97,10 @@ template:
             {%- set hour = now().hour -%}
             {%- set guard = is_state('input_boolean.ev_tariff_guard_enabled', 'on') -%}
             {%- set tariff = (hour >= 6 and hour < 22) and guard -%}
-            {%- set power = states('input_number.ev_max_tariff_power_kw') | float(3.0)
-               if tariff else
+            {%- set max_kw = states('input_number.ev_max_tariff_power_kw') | float(0) -%}
+            {%- set tariff_throttling = tariff and max_kw > 0
+               and (max_kw * 1000 / (400 * 1.732)) >= 10 -%}
+            {%- set power = max_kw if tariff_throttling else
                states('sensor.ev_charging_power_kw') | float(7.0) -%}
             {%- if power > 0 -%}
               {{ (remaining / power / 0.25) | round(0, 'ceil') | int }}
