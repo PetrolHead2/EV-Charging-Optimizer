@@ -8,7 +8,7 @@ Reads : sensor.ev_schedule            (windows computed by ev_optimizer.py)
         sensor.ev_slots_available / sensor.ev_slots_needed  (for pressure reason)
         input_datetime.ev_last_state_change  (hysteresis tracking)
         sensor.laddbox_charger_mode    (actual charger state)
-Writes: zaptec.resume_charging / zaptec.stop_charging
+Writes: button.laddbox_resume_charging / button.laddbox_stop_charging
         input_datetime.ev_last_state_change
         input_text.ev_decision_reason
 
@@ -52,6 +52,21 @@ SLOTS_NEEDED_ENT     = "sensor.ev_slots_needed"
 # Zaptec installation ID — used by zaptec.limit_current (installation-level service)
 ZAPTEC_INSTALL_ID  = "dcead66e-4c50-4763-bc17-6ef3efe8be1f"
 
+# Zaptec button entities — replaces deprecated zaptec.resume_charging /
+# zaptec.stop_charging service calls. These are unavailable when no car is
+# connected, so always check CONNECTED_STATES before pressing them.
+RESUME_BTN_ENT     = "button.laddbox_resume_charging"
+STOP_BTN_ENT       = "button.laddbox_stop_charging"
+
+# All sensor.laddbox_charger_mode states that indicate a car is physically
+# connected. Any other state (disconnected / unknown) means no car is present
+# and all Zaptec service calls must be skipped.
+CONNECTED_STATES = {
+    "connected_requesting",   # car connected, awaiting charge start
+    "connected_charging",     # session actively running
+    "connected_finished",     # session done (BMS limit, manual stop, or optimizer stop)
+}
+
 # Electrical installation constants — Zaptec GO, 3-phase TN, 25A circuit
 CIRCUIT_MAX_AMPS   = 25
 PHASE_VOLTAGE      = 400    # line voltage (V)
@@ -66,9 +81,14 @@ HYSTERESIS_MINUTES = 15
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _is_charging():
-    """Return True if the Zaptec charger is currently in active charging mode."""
+    """Return True if the Zaptec charger is in active charging mode.
+
+    The Zaptec integration (v0.8.x) uses 'connected_charging' for the active
+    state — not plain 'charging'. This is the only state where the session
+    is actually delivering energy to the car.
+    """
     mode = state.get(CHARGER_MODE_ENT) or ""
-    return str(mode).lower() == "charging"
+    return str(mode).lower() == "connected_charging"
 
 
 def _apply_current_limit():
@@ -216,10 +236,16 @@ def set_charger(on, reason):
         now_str   = now_local.strftime("%Y-%m-%d %H:%M:%S")
 
         if on:
-            zaptec.resume_charging(charger_id=ZAPTEC_DEVICE_ID)
+            # Press button entity — replaces deprecated zaptec.resume_charging.
+            # Works for connected_requesting (fresh plug-in) and
+            # connected_finished (session ended or stopped by optimizer).
+            # Connection guard at ev_control_loop() entry ensures the button
+            # entity is available whenever we reach this point.
+            button.press(entity_id=RESUME_BTN_ENT)
             log.info(f"ev_control_loop: STARTED charging — {reason}")
         else:
-            zaptec.stop_charging(charger_id=ZAPTEC_DEVICE_ID)
+            # Press button entity — replaces deprecated zaptec.stop_charging.
+            button.press(entity_id=STOP_BTN_ENT)
             log.info(f"ev_control_loop: STOPPED charging — {reason}")
             # Reset current to circuit maximum so manual charging always works at
             # full speed even if HA becomes unreachable after this stop.
@@ -260,6 +286,7 @@ def ev_control_loop():
 
     Priority chain (evaluated top-to-bottom, first match wins — no fall-through):
 
+    0. Car not connected      → update reason, return immediately; no Zaptec calls
     1. Mode = "Stop"          → always OFF — no exceptions, no hysteresis
     2. Mode = "Charge now"    → always ON  — no exceptions, no hysteresis
     3. Deadline pressure ON   → always ON  — bypasses hysteresis, schedule check,
@@ -269,6 +296,18 @@ def ev_control_loop():
     5. Inside scheduled window  → ON  (subject to hysteresis + consumption guard)
     6. Outside scheduled window → OFF (subject to hysteresis)
     """
+    # ── Step 0: Connection guard — no car, no Zaptec calls ────────────────────
+    # Button entities are unavailable when no car is connected; attempting any
+    # Zaptec action without a car will raise errors. Bail out early and write a
+    # stable reason string so the UI does not flicker on every 5-min tick.
+    zaptec_mode = state.get(CHARGER_MODE_ENT) or "unknown"
+    if zaptec_mode not in CONNECTED_STATES:
+        reason_str = f"No car connected ({zaptec_mode})"
+        if (state.get(REASON_ENT) or "") != reason_str:
+            input_text.set_value(entity_id=REASON_ENT, value=reason_str)
+        log.debug(f"ev_control_loop: {reason_str} — skipping")
+        return
+
     mode = state.get(MODE_ENT) or "Smart"
 
     # ── Step 1: Manual Stop — absolute OFF, no exceptions ─────────────────────
@@ -453,10 +492,10 @@ def on_zaptec_state_changed(value=None, old_value=None, **kwargs):
     React immediately whenever Zaptec changes state.
 
     Covers all transitions:
-      disconnected      → car just plugged in (Zaptec may auto-start)
-      connected_finished → charging session ended (e.g. SoC target reached)
-      charging          → Zaptec began charging (auto-start or manual resume)
-      any → disconnected → car unplugged; loop resets decision reason
+      disconnected/unknown   → car unplugged; writes "No car connected" reason
+      connected_requesting   → car just plugged in; may need start command
+      connected_charging     → Zaptec began charging (auto-start or resume)
+      connected_finished     → session done (BMS limit, schedule stop, etc.)
 
     Runs the full priority-chain decision so we don't wait up to 5 minutes
     for the time trigger. A 2-second delay lets HA state fully settle before
@@ -464,8 +503,16 @@ def on_zaptec_state_changed(value=None, old_value=None, **kwargs):
     for input_datetime triggers).
     """
     log.info(
-        f"ev_control_loop: Zaptec state changed: {old_value} → {value} — "
-        f"running immediate control loop"
+        f"ev_control_loop: Zaptec state changed: {old_value} → {value}"
     )
+    if value not in CONNECTED_STATES:
+        # Car unplugged or state unknown — no point running the control loop.
+        # Write reason directly so the UI updates immediately.
+        log.info(
+            f"ev_control_loop: car not connected ({value}) — skipping control loop"
+        )
+        input_text.set_value(entity_id=REASON_ENT, value=f"No car connected ({value})")
+        return
+    # Car is (now) connected — let HA state settle then run the full decision chain.
     task.sleep(2)
     ev_control_loop()
