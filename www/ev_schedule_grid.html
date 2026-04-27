@@ -102,6 +102,23 @@
       border-color: #03a9f4;
     }
 
+    /* ── Clear button (secondary / muted) ────────────────────────────────── */
+    .clear-btn {
+      display: block;
+      width: 100%;
+      margin-top: 6px;
+      padding: 7px 0;
+      background: #2a2a2a;
+      color: #777;
+      border: 1px solid #3a3a3a;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+    }
+    .clear-btn:hover  { background: #333; color: #aaa; }
+    .clear-btn:active { background: #3a3a3a; }
+
     /* ── Save button ──────────────────────────────────────────────────────── */
     #save-btn {
       display: block;
@@ -217,13 +234,14 @@
   </table>
 
   <button id="save-btn" onclick="saveSchedule()">Save</button>
+  <button class="clear-btn" onclick="clearManualDeadline()">Clear manual departure override</button>
 
   <div class="status-row">
     <div>
       <div class="status-label">Next departure</div>
-      <div class="status-value" id="next-dep">—</div>
+      <div class="status-value" id="next-departure">—</div>
     </div>
-    <div id="mode-badge" class="mode-badge">—</div>
+    <div id="deadline-source" class="mode-badge">—</div>
   </div>
 
   <div class="toggle-row">
@@ -307,15 +325,19 @@
     }
 
     // ── Status line + auto-toggle state ──────────────────────────────────────
+    function formatDateTime(ms) {
+      // Format epoch-ms as local "Tue 28 Apr 08:00"
+      const d      = new Date(ms);
+      const days   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul',
+                      'Aug','Sep','Oct','Nov','Dec'];
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]} ${hh}:${mm}`;
+    }
+
     async function loadStatus() {
       const MIN_AHEAD_MS = 5 * 60 * 1000;   // 5 minutes
-
-      function formatDeadline(epochSec) {
-        // Format UTC epoch seconds as local "YYYY-MM-DD HH:MM"
-        const d = new Date(epochSec * 1000);
-        const pad = n => String(n).padStart(2, "0");
-        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-      }
 
       try {
         const [manualData, autoData] = await Promise.all([
@@ -323,30 +345,37 @@
           haGet("/api/states/input_datetime.ev_computed_deadline"),
         ]);
 
-        const nowMs     = Date.now();
-        const manualTs  = (manualData.attributes?.timestamp ?? 0) * 1000;
-        const autoTs    = (autoData.attributes?.timestamp ?? 0) * 1000;
-        const depEl     = document.getElementById("next-dep");
+        const nowMs    = Date.now();
+        const manualTs = (manualData.attributes?.timestamp ?? 0) * 1000;
+        const autoTs   = (autoData.attributes?.timestamp   ?? 0) * 1000;
+        const depEl    = document.getElementById("next-departure");
+        const srcEl    = document.getElementById("deadline-source");
 
+        let statusText, statusSource;
         if (manualTs > nowMs + MIN_AHEAD_MS) {
-          depEl.textContent = formatDeadline(manualTs / 1000) + " (manual)";
+          statusText   = formatDateTime(manualTs);
+          statusSource = 'manual';
         } else if (autoTs > nowMs + MIN_AHEAD_MS) {
-          depEl.textContent = formatDeadline(autoTs / 1000) + " (auto)";
+          statusText   = formatDateTime(autoTs);
+          statusSource = 'auto';
         } else {
-          depEl.textContent = "Auto (opportunistic — no deadline set)";
+          statusText   = 'No deadline set';
+          statusSource = 'none';
         }
+
+        depEl.textContent = statusText;
+        srcEl.textContent = statusSource === 'manual' ? '📅 Manual' :
+                            statusSource === 'auto'   ? '🗓 Auto'   :
+                                                        '🔮 Opportunistic';
+        srcEl.className   = 'mode-badge' + (statusSource === 'auto' ? ' auto' : '');
       } catch (e) {
-        document.getElementById("next-dep").textContent = "unavailable";
+        document.getElementById("next-departure").textContent = "unavailable";
         console.warn("loadStatus (deadline):", e.message);
       }
 
       try {
         const d  = await haGet("/api/states/input_boolean.ev_auto_deadline");
-        const on = d.state === "on";
-        document.getElementById("auto-chk").checked = on;
-        const badge = document.getElementById("mode-badge");
-        badge.textContent = on ? "Auto ✓" : "Manual";
-        badge.className   = "mode-badge" + (on ? " auto" : "");
+        document.getElementById("auto-chk").checked = d.state === "on";
       } catch (e) {
         console.warn("loadStatus (auto):", e.message);
       }
@@ -398,12 +427,22 @@
         await haPost(`/api/services/input_boolean/turn_${on ? "on" : "off"}`, {
           entity_id: "input_boolean.ev_auto_deadline",
         });
-        const badge = document.getElementById("mode-badge");
-        badge.textContent = on ? "Auto ✓" : "Manual";
-        badge.className   = "mode-badge" + (on ? " auto" : "");
         setTimeout(loadStatus, 1500);
       } catch (e) {
         console.error("toggleAuto:", e.message);
+      }
+    }
+
+    // ── Clear manual departure override ───────────────────────────────────────
+    async function clearManualDeadline() {
+      try {
+        await haPost("/api/services/input_datetime/set_datetime", {
+          entity_id: "input_datetime.ev_deadline",
+          datetime:  "2000-01-01 00:00:00",
+        });
+        await loadStatus();
+      } catch (e) {
+        console.error("clearManualDeadline:", e.message);
       }
     }
 
