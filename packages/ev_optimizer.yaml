@@ -150,10 +150,11 @@ automation:
         entity_id: sensor.ev_remaining_kwh
         below: 0.2
     condition:
-      # Only act when the charger is actually running
+      # Only act when the charger is actually running.
+      # Zaptec integration v0.8.x uses "connected_charging" — not plain "charging".
       - condition: state
         entity_id: sensor.laddbox_charger_mode
-        state: "charging"
+        state: "connected_charging"
     action:
       - service: zaptec.stop_charging
         data:

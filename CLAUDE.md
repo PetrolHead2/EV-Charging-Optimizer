@@ -209,6 +209,10 @@ The **safety layer** (automations in `packages/ev_optimizer.yaml`) runs independ
 
 ## Known Quirks
 
+31. **All automations in `ev_optimizer.yaml` have `id:` fields (2026-04-27)**: All four safety automations carry an `id:` field so they appear as editable/toggle-able entries in **Settings → Automations** in the HA UI. The package file remains the source of truth — changes must be made in the file and reloaded, not through the GUI editor. Template sensors and input helpers in the same package file cannot be edited from the UI (no `id:` concept for those domains); use Claude Code + SCP workflow to modify them. Ghost automation entities (`automation.ev_safety_soc_target_reached`, `automation.ev_safety_deadline_passed`) may appear as `unavailable` in the state registry — these are remnants of removed automations and are harmless. They disappear after an HA restart.
+
+32. **Safety automation condition uses `connected_charging` (2026-04-27)**: The `ev_safety_target_reached` automation had `state: "charging"` in its condition, which never matched because Zaptec v0.8.x reports the active state as `"connected_charging"`. The condition was corrected to `state: "connected_charging"`. Without this fix the safety stop for energy-target-reached would silently never fire.
+
 1. **Pyscript AST restrictions**: Generator expressions are not supported. Always use list comprehensions: `sum([x for x in items])` not `sum(x for x in items)`. Affects avg_px, sorted_px, total_kwh, total_cost calculations.
 
 2. **Pyscript lambda closure bug**: Lambdas cannot close over local variables from an enclosing scope — raises `NameError` at runtime. Always capture enclosing variables via a default argument: `lambda i, d=by_idx: d[i]["price"]` instead of `lambda i: by_idx[i]["price"]`. Note: lambdas using only their own parameters (e.g. `lambda s: s["price"]`) are fine.
