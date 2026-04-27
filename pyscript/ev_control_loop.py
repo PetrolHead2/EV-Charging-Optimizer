@@ -155,6 +155,15 @@ def should_charge_now(schedule):
 
     Returns:
         bool – True if we are currently inside a scheduled charging window
+
+    Window matching uses a 900-second (one slot) lookback so a window that just
+    opened is never missed due to sub-second timing skew between the optimizer
+    tick and the control loop tick.  This mirrors the -900s slot-filter lookback
+    in compute_schedule() / compute_opportunistic_schedule().
+
+    Keys are read with .get() fallbacks so a stale schedule stored with legacy
+    key names ('start_ts', 'end_ts') is tolerated rather than causing a silent
+    KeyError that makes every window appear inactive.
     """
     if not schedule:
         return False
@@ -169,11 +178,20 @@ def should_charge_now(schedule):
 
     for window in schedule:
         try:
-            w_start = float(window["s"])
-            w_end   = float(window["e"])
+            # Use .get() with fallbacks so a KeyError never silently skips a window.
+            # Primary keys are compact epoch integers 's' / 'e' written by ev_optimizer.
+            # Fallbacks guard against any legacy format still in sensor state on startup.
+            w_start = float(window.get("s", window.get("start_ts", 0)))
+            w_end   = float(window.get("e", window.get("end_ts",   0)))
+            if w_start == 0 and w_end == 0:
+                log.warning(f"ev_control_loop: window missing 's'/'e' keys: {window}")
+                continue
             w_start_str = datetime.fromtimestamp(w_start, tz=local_tz).strftime("%H:%M")
             w_end_str   = datetime.fromtimestamp(w_end,   tz=local_tz).strftime("%H:%M")
-            active = now_ts >= w_start and now_ts < w_end
+            # Active: window started within the last 900 s (one 15-min slot) AND
+            # has not yet ended.  The lookback covers the full current slot so we
+            # never miss a window that opened seconds before the tick ran.
+            active = w_start >= now_ts - 900 and w_end > now_ts
             log.info(
                 f"  window {w_start_str}–{w_end_str}: {'ACTIVE' if active else 'inactive'}"
             )
@@ -182,6 +200,7 @@ def should_charge_now(schedule):
         except Exception as exc:
             log.warning(f"ev_control_loop: cannot parse window {window}: {exc}")
 
+    log.info("should_charge_now: no active window found")
     return False
 
 
@@ -236,11 +255,31 @@ def set_charger(on, reason):
         now_str   = now_local.strftime("%Y-%m-%d %H:%M:%S")
 
         if on:
+            # Check button entity availability before pressing — the Zaptec
+            # integration may still have the button as 'unavailable' for 1-5 s
+            # after the charger mode transitions to a connected state.  Retry
+            # once with a 5-second wait rather than firing a HA service warning.
+            btn_state = state.get(RESUME_BTN_ENT) or "unavailable"
+            if btn_state == "unavailable":
+                log.info(
+                    "ev_control_loop: resume button unavailable, "
+                    "waiting 5 s for Zaptec to settle..."
+                )
+                task.sleep(5)
+                btn_state = state.get(RESUME_BTN_ENT) or "unavailable"
+            if btn_state == "unavailable":
+                log.warning(
+                    "ev_control_loop: resume button still unavailable after wait — "
+                    "skipping press; will retry on next tick"
+                )
+                input_text.set_value(
+                    entity_id=REASON_ENT,
+                    value=reason[:230] + " [btn unavailable]",
+                )
+                return
             # Press button entity — replaces deprecated zaptec.resume_charging.
             # Works for connected_requesting (fresh plug-in) and
             # connected_finished (session ended or stopped by optimizer).
-            # Connection guard at ev_control_loop() entry ensures the button
-            # entity is available whenever we reach this point.
             button.press(entity_id=RESUME_BTN_ENT)
             log.info(f"ev_control_loop: STARTED charging — {reason}")
         else:
@@ -300,23 +339,49 @@ def ev_control_loop():
     # Button entities are unavailable when no car is connected; attempting any
     # Zaptec action without a car will raise errors. Bail out early and write a
     # stable reason string so the UI does not flicker on every 5-min tick.
+    #
+    # Race-condition tolerance: Zaptec transitions through intermediate states
+    # ('unknown', 'unavailable') when the car is first plugged in.  If we see
+    # one of those transitioning states, wait 3 seconds and re-read once before
+    # giving up — this lets the integration settle without the 5-min tick
+    # missing the connection event entirely.
     zaptec_mode = state.get(CHARGER_MODE_ENT) or "unknown"
     if zaptec_mode not in CONNECTED_STATES:
-        reason_str = f"No car connected ({zaptec_mode})"
-        if (state.get(REASON_ENT) or "") != reason_str:
-            input_text.set_value(entity_id=REASON_ENT, value=reason_str)
-        log.debug(f"ev_control_loop: {reason_str} — skipping")
-        return
+        if zaptec_mode in ("unknown", "unavailable"):
+            log.info(
+                f"ev_control_loop: Zaptec state transitioning ({zaptec_mode}), "
+                f"waiting 3 s for integration to settle..."
+            )
+            task.sleep(3)
+            zaptec_mode = state.get(CHARGER_MODE_ENT) or "unknown"
+
+        if zaptec_mode not in CONNECTED_STATES:
+            reason_str = f"No car connected ({zaptec_mode})"
+            if (state.get(REASON_ENT) or "") != reason_str:
+                input_text.set_value(entity_id=REASON_ENT, value=reason_str)
+            log.debug(f"ev_control_loop: {reason_str} — skipping")
+            return
+
+        log.info(f"ev_control_loop: Zaptec settled to '{zaptec_mode}' after wait")
 
     mode = state.get(MODE_ENT) or "Smart"
 
+    log.info(
+        f"ev_control_loop: tick — "
+        f"mode={mode} "
+        f"pressure={state.get(PRESSURE_ENT) or 'off'} "
+        f"zaptec={zaptec_mode}"
+    )
+
     # ── Step 1: Manual Stop — absolute OFF, no exceptions ─────────────────────
     if mode == "Stop":
+        log.info("ev_control_loop: Priority step 1: mode=Stop → OFF")
         set_charger(False, "Manual override: Stop")
         return
 
     # ── Step 2: Manual Charge now — absolute ON, no exceptions ────────────────
     if mode == "Charge now":
+        log.info("ev_control_loop: Priority step 2: mode=Charge now → ON")
         set_charger(True, "Manual override: Charge now")
         return
 
@@ -334,11 +399,13 @@ def ev_control_loop():
             f"({slots_avail} slots available, {slots_needed} needed)"
         )
         log.info(
-            f"ev_control_loop: deadline pressure — forcing ON, bypassing hysteresis "
-            f"({slots_avail} slots avail, {slots_needed} needed)"
+            f"ev_control_loop: Priority step 3: deadline pressure → ON "
+            f"({slots_avail} slots avail, {slots_needed} needed) — bypassing hysteresis"
         )
         set_charger(True, reason)
         return
+
+    log.info("ev_control_loop: Priority step 3: no deadline pressure")
 
     # ── Step 4: No schedule — safe default, stop only if currently charging ───
     # sensor.ev_schedule state IS the JSON string; parse it directly.
@@ -352,6 +419,7 @@ def ev_control_loop():
             schedule = []
 
     if not isinstance(schedule, list) or len(schedule) == 0:
+        log.info("ev_control_loop: Priority step 4: no schedule available")
         if _is_charging():
             set_charger(False, "No schedule available — stopping unauthorised charge")
         else:
@@ -371,6 +439,10 @@ def ev_control_loop():
     dl_source   = sched_attrs.get("deadline_source") or "opportunistic"
     dl_ts       = sched_attrs.get("deadline_ts")
 
+    log.info(
+        f"ev_control_loop: Priority step {'5' if desired else '6'}: "
+        f"should_charge_now={desired} → {'ON' if desired else 'OFF'}"
+    )
     if desired:
         reason = f"In scheduled window ({price_str})"
     else:
