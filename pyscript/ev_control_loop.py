@@ -2,13 +2,23 @@
 ev_control_loop.py — EV Charging Optimizer control loop
 Runs every 5 minutes to start/stop charging based on the computed schedule.
 
+TWO ZAPTEC DEVICES:
+  Charger (laddbox): session-level control — ON/OFF and current throttling.
+    switch.laddbox_charging            — turn session on/off
+    number.laddbox_charger_max_current — per-session current limit (A)
+    sensor.laddbox_charger_mode        — charger state
+  Installation (magnus_niemi): circuit capacity.
+    NEVER written by this file — circuit changes affect all appliances.
+    Read by the Zaptec integration but controlled only from the Zaptec portal.
+
 Reads : sensor.ev_schedule            (windows computed by ev_optimizer.py)
         input_select.ev_charging_mode  (Smart / Charge now / Stop)
         binary_sensor.ev_deadline_pressure
         sensor.ev_slots_available / sensor.ev_slots_needed  (for pressure reason)
         input_datetime.ev_last_state_change  (hysteresis tracking)
         sensor.laddbox_charger_mode    (actual charger state)
-Writes: button.laddbox_resume_charging / button.laddbox_stop_charging
+Writes: switch.laddbox_charging
+        number.laddbox_charger_max_current
         input_datetime.ev_last_state_change
         input_text.ev_decision_reason
 
@@ -31,8 +41,6 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 # ── Constants ──────────────────────────────────────────────────────────────────
-ZAPTEC_DEVICE_ID = "d0775df2-6290-4569-bcd0-b579f8b9dde3"
-
 SCHEDULE_ENT     = "sensor.ev_schedule"
 MODE_ENT         = "input_select.ev_charging_mode"
 PRESSURE_ENT     = "binary_sensor.ev_deadline_pressure"
@@ -43,92 +51,118 @@ PRICE_ENT        = "sensor.nordpool_kwh_se3_sek_3_10_025"
 CHARGE_PWR_ENT   = "sensor.ev_charging_power_kw"
 TIBBER_ACCUM_ENT = "sensor.tibber_pulse_dianavagen_15_accumulated_consumption_current_hour"
 TIBBER_AVG_W_ENT = "sensor.tibber_pulse_dianavagen_15_average_power"
-GUARD_ENT            = "input_boolean.ev_tariff_guard_enabled"
-MAX_KWH_ENT          = "input_number.ev_max_hourly_kwh"
-MAX_TARIFF_KW_ENT    = "input_number.ev_max_tariff_power_kw"
-SLOTS_AVAIL_ENT      = "sensor.ev_slots_available"
-SLOTS_NEEDED_ENT     = "sensor.ev_slots_needed"
+GUARD_ENT        = "input_boolean.ev_tariff_guard_enabled"
+MAX_KWH_ENT      = "input_number.ev_max_hourly_kwh"
+MAX_TARIFF_KW_ENT = "input_number.ev_max_tariff_power_kw"
+SLOTS_AVAIL_ENT  = "sensor.ev_slots_available"
+SLOTS_NEEDED_ENT = "sensor.ev_slots_needed"
 
-# Zaptec installation ID — used by zaptec.limit_current (installation-level service)
-ZAPTEC_INSTALL_ID  = "dcead66e-4c50-4763-bc17-6ef3efe8be1f"
+# ── Zaptec Charger (laddbox) — session-level entities ─────────────────────────
+# These affect only the active EV session, not the whole circuit.
+SWITCH_ENT              = "switch.laddbox_charging"
+CHARGER_MAX_CURRENT_ENT = "number.laddbox_charger_max_current"
 
-# Zaptec button entities — replaces deprecated zaptec.resume_charging /
-# zaptec.stop_charging service calls. These are unavailable when no car is
-# connected, so always check CONNECTED_STATES before pressing them.
-RESUME_BTN_ENT     = "button.laddbox_resume_charging"
-STOP_BTN_ENT       = "button.laddbox_stop_charging"
-
-# All sensor.laddbox_charger_mode states that indicate a car is physically
-# connected. Any other state (disconnected / unknown) means no car is present
-# and all Zaptec service calls must be skipped.
-CONNECTED_STATES = {
-    "connected_requesting",   # car connected, awaiting charge start
-    "connected_charging",     # session actively running
-    "connected_finished",     # session done (BMS limit, manual stop, or optimizer stop)
-}
-
-# Electrical installation constants — Zaptec GO, 3-phase TN, 25A circuit
-CIRCUIT_MAX_AMPS   = 25
-PHASE_VOLTAGE      = 400    # line voltage (V)
-PHASE_FACTOR       = 1.732  # sqrt(3) for 3-phase power: P = sqrt(3) * V * I
+# ── Electrical constants — Zaptec GO, 3-phase TN, 400 V, 25 A circuit ─────────
+CIRCUIT_MAX_AMPS = 25
+CHARGER_MIN_AMPS = 6     # Zaptec GO will not charge below this value
+PHASE_VOLTAGE    = 400   # line-to-line voltage (V)
+PHASE_FACTOR     = 1.732 # sqrt(3) for 3-phase: P = sqrt(3) × V × I
 
 TARIFF_HOUR_START  = 6
 TARIFF_HOUR_END    = 22
 TZ_LOCAL           = ZoneInfo("Europe/Stockholm")
 HYSTERESIS_MINUTES = 15
 
+# ── Charger state sets ─────────────────────────────────────────────────────────
+# States where the car is connected and the session can be started or stopped.
+CHARGEABLE_STATES = {
+    "Waiting",              # Zaptec firmware alternate label
+    "connected_requesting", # car connected, awaiting charge start
+    "connected_finishing",  # session winding down (rare transient)
+    "connected_finished",   # session done (BMS limit, manual stop, or optimizer stop)
+    "paused",               # session paused by integration
+}
+# States where the charger is actively delivering energy.
+CHARGING_STATES = {
+    "connected_charging",   # Zaptec integration v0.8.x active state
+    "Charging",             # Zaptec firmware alternate label
+}
+# States where no car is physically present.
+DISCONNECTED_STATES = {
+    "Disconnected",         # firmware alternate label
+    "disconnected",         # integration v0.8.x
+}
+# Union used by the connection guard — any car-present state passes through.
+CONNECTED_STATES = CHARGEABLE_STATES | CHARGING_STATES
+
+
+# ── Current-control helpers ────────────────────────────────────────────────────
+
+def set_charge_current(amps):
+    """
+    Set the per-session charge current limit via the charger-level entity.
+
+    Uses number.laddbox_charger_max_current which only affects the current
+    EV session — the installation circuit capacity is unchanged.
+    Clamps to [CHARGER_MIN_AMPS, CIRCUIT_MAX_AMPS].
+
+    3-phase 400 V power: kW = amps × 400 × 1.732 / 1000
+    """
+    amps = max(CHARGER_MIN_AMPS, min(int(amps), CIRCUIT_MAX_AMPS))
+    number.set_value(entity_id=CHARGER_MAX_CURRENT_ENT, value=amps)
+    kw = amps * PHASE_VOLTAGE * PHASE_FACTOR / 1000
+    log.info(f"ev_control_loop: set_charge_current: {amps}A = {kw:.1f} kW")
+
+
+def reset_to_full_current():
+    """
+    Reset the charger-level current to circuit maximum.
+
+    Called on every stop and HA startup so that manual charging always
+    starts at full speed even if HA was unreachable during a throttled session.
+    Does NOT touch the installation (magnus_niemi) entities.
+    """
+    number.set_value(entity_id=CHARGER_MAX_CURRENT_ENT, value=CIRCUIT_MAX_AMPS)
+    log.info(f"ev_control_loop: reset_to_full_current: {CIRCUIT_MAX_AMPS}A")
+
 
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _is_charging():
-    """Return True if the Zaptec charger is in active charging mode.
+    """Return True if the charger is in an active-charging state."""
+    mode = str(state.get(CHARGER_MODE_ENT) or "")
+    return mode in CHARGING_STATES
 
-    The Zaptec integration (v0.8.x) uses 'connected_charging' for the active
-    state — not plain 'charging'. This is the only state where the session
-    is actually delivering energy to the car.
+
+def _apply_tariff_current():
     """
-    mode = state.get(CHARGER_MODE_ENT) or ""
-    return str(mode).lower() == "connected_charging"
+    Apply or restore the session current limit based on tariff-hour rules.
 
+    Inside tariff hours (06:00–22:00 local) with guard enabled:
+      throttle to input_number.ev_max_tariff_power_kw via set_charge_current().
+    Otherwise: restore to CIRCUIT_MAX_AMPS via reset_to_full_current().
 
-def _apply_current_limit():
-    """
-    Set Zaptec charge current via zaptec.limit_current (installation level).
-
-    Inside tariff hours (06:00–22:00) with guard enabled: throttle to
-    input_number.ev_max_tariff_power_kw, converted to amps for 3-phase 400 V.
-    Minimum enforced: 6 A (below this Zaptec will not charge).
-    Outside tariff hours or guard disabled: restore to CIRCUIT_MAX_AMPS.
+    Only touches number.laddbox_charger_max_current — never the installation.
     """
     local_tz   = ZoneInfo(hass.config.time_zone)
     local_hour = datetime.now(tz=local_tz).hour
     guard_on   = (state.get(GUARD_ENT) or "off") == "on"
 
     if not guard_on or local_hour < TARIFF_HOUR_START or local_hour >= TARIFF_HOUR_END:
-        zaptec.limit_current(
-            installation_id  = ZAPTEC_INSTALL_ID,
-            available_current = CIRCUIT_MAX_AMPS,
-        )
+        reset_to_full_current()
         if not guard_on:
-            log.debug("ev_control_loop: Tariff limiting: guard disabled, full power")
+            log.debug("ev_control_loop: Tariff limiting: guard disabled — full power")
         else:
-            log.debug("ev_control_loop: Tariff limiting: outside tariff hours, full power")
+            log.debug("ev_control_loop: Tariff limiting: outside tariff hours — full power")
         return
 
     # Inside tariff hours — throttle to configured kW limit
     max_kw = float(state.get(MAX_TARIFF_KW_ENT) or 3.0)
     amps   = int(max_kw * 1000 / (PHASE_VOLTAGE * PHASE_FACTOR))
-    if amps < 6:
-        amps = 6
-    if amps > CIRCUIT_MAX_AMPS:
-        amps = CIRCUIT_MAX_AMPS
-
-    zaptec.limit_current(
-        installation_id  = ZAPTEC_INSTALL_ID,
-        available_current = amps,
-    )
+    set_charge_current(amps)   # clamps to [CHARGER_MIN_AMPS, CIRCUIT_MAX_AMPS]
     log.info(
-        f"ev_control_loop: Tariff limiting: {max_kw:.1f} kW → {amps}A "
+        f"ev_control_loop: Tariff limiting: {max_kw:.1f} kW → "
+        f"{max(CHARGER_MIN_AMPS, min(int(amps), CIRCUIT_MAX_AMPS))}A "
         f"(3-phase {PHASE_VOLTAGE}V, tariff hours)"
     )
 
@@ -241,62 +275,55 @@ def set_charger(on, reason):
     """
     Start or stop the Zaptec charger and record the decision.
 
-    If the charger is already in the desired state the service call is skipped
+    ON/OFF is controlled via switch.laddbox_charging (session-level).
+    Current throttling uses number.laddbox_charger_max_current (session-level).
+    The installation entity (magnus_niemi) is never written here.
+
+    If the charger is already in the desired state the switch call is skipped
     but reason and last_change are still updated.
 
     Args:
         on     : bool – True = start charging, False = stop charging
         reason : str  – human-readable explanation written to ev_decision_reason
     """
-    current = _is_charging()
+    current    = _is_charging()
+    zaptec_mode = str(state.get(CHARGER_MODE_ENT) or "unknown")
 
     if on != current:
         now_local = datetime.now(tz=TZ_LOCAL)
         now_str   = now_local.strftime("%Y-%m-%d %H:%M:%S")
 
         if on:
-            # Check button entity availability before pressing — the Zaptec
-            # integration may still have the button as 'unavailable' for 1-5 s
-            # after the charger mode transitions to a connected state.  Retry
-            # once with a 5-second wait rather than firing a HA service warning.
-            btn_state = state.get(RESUME_BTN_ENT) or "unavailable"
-            if btn_state == "unavailable":
+            if zaptec_mode in DISCONNECTED_STATES:
+                # Charger reports no car — should have been caught by connection guard,
+                # but guard here as a safety net.
                 log.info(
-                    "ev_control_loop: resume button unavailable, "
-                    "waiting 5 s for Zaptec to settle..."
+                    f"ev_control_loop: set_charger ON: skipping — "
+                    f"car disconnected ({zaptec_mode})"
                 )
-                task.sleep(5)
-                btn_state = state.get(RESUME_BTN_ENT) or "unavailable"
-            if btn_state == "unavailable":
-                log.warning(
-                    "ev_control_loop: resume button still unavailable after wait — "
-                    "skipping press; will retry on next tick"
-                )
-                input_text.set_value(
-                    entity_id=REASON_ENT,
-                    value=reason[:230] + " [btn unavailable]",
-                )
+                input_text.set_value(entity_id=REASON_ENT, value=reason[:255])
                 return
-            # Press button entity — replaces deprecated zaptec.resume_charging.
-            # Works for connected_requesting (fresh plug-in) and
-            # connected_finished (session ended or stopped by optimizer).
-            button.press(entity_id=RESUME_BTN_ENT)
+
+            if zaptec_mode not in CHARGEABLE_STATES and zaptec_mode not in CHARGING_STATES:
+                log.warning(
+                    f"ev_control_loop: set_charger ON: unexpected mode "
+                    f"'{zaptec_mode}' — attempting switch.turn_on anyway"
+                )
+
+            switch.turn_on(entity_id=SWITCH_ENT)
             log.info(f"ev_control_loop: STARTED charging — {reason}")
+
+            # Apply tariff current limit (or restore full power outside tariff hours)
+            _apply_tariff_current()
+
         else:
-            # Press button entity — replaces deprecated zaptec.stop_charging.
-            button.press(entity_id=STOP_BTN_ENT)
+            switch.turn_off(entity_id=SWITCH_ENT)
             log.info(f"ev_control_loop: STOPPED charging — {reason}")
-            # Reset current to circuit maximum so manual charging always works at
-            # full speed even if HA becomes unreachable after this stop.
-            zaptec.limit_current(
-                installation_id   = ZAPTEC_INSTALL_ID,
-                available_current = CIRCUIT_MAX_AMPS,
-            )
-            reason = reason + f" | Zaptec reset to {CIRCUIT_MAX_AMPS}A"
-            log.info(
-                f"ev_control_loop: Zaptec reset to full current {CIRCUIT_MAX_AMPS}A"
-                f" — ready for manual use"
-            )
+
+            # Always reset to full current on stop so manual charging starts at
+            # full speed if HA becomes unreachable after this stop.
+            reset_to_full_current()
+            reason = reason + f" | current reset to {CIRCUIT_MAX_AMPS}A"
 
         # Record time of this transition for hysteresis tracking
         input_datetime.set_datetime(entity_id=LAST_CHANGE_ENT, datetime=now_str)
@@ -304,11 +331,10 @@ def set_charger(on, reason):
         log.debug(
             f"ev_control_loop: charger already {'ON' if on else 'OFF'} — no action"
         )
-
-    # Apply (or restore) current limit whenever charging is ON.
-    # Called even when charger was already on to handle tariff-hour transitions.
-    if on:
-        _apply_current_limit()
+        # Apply (or restore) current limit even when state unchanged,
+        # to handle tariff-hour boundary transitions.
+        if on:
+            _apply_tariff_current()
 
     # Always update reason text so UI reflects current decision
     input_text.set_value(entity_id=REASON_ENT, value=reason[:255])
@@ -325,7 +351,7 @@ def ev_control_loop():
 
     Priority chain (evaluated top-to-bottom, first match wins — no fall-through):
 
-    0. Car not connected      → update reason, return immediately; no Zaptec calls
+    0. Car not connected      → update reason, return immediately; no switch calls
     1. Mode = "Stop"          → always OFF — no exceptions, no hysteresis
     2. Mode = "Charge now"    → always ON  — no exceptions, no hysteresis
     3. Deadline pressure ON   → always ON  — bypasses hysteresis, schedule check,
@@ -335,16 +361,13 @@ def ev_control_loop():
     5. Inside scheduled window  → ON  (subject to hysteresis + consumption guard)
     6. Outside scheduled window → OFF (subject to hysteresis)
     """
-    # ── Step 0: Connection guard — no car, no Zaptec calls ────────────────────
-    # Button entities are unavailable when no car is connected; attempting any
-    # Zaptec action without a car will raise errors. Bail out early and write a
-    # stable reason string so the UI does not flicker on every 5-min tick.
+    # ── Step 0: Connection guard — no car, no switch calls ────────────────────
+    # switch.laddbox_charging is unavailable when no car is connected.
+    # Bail out early and write a stable reason so the UI does not flicker.
     #
-    # Race-condition tolerance: Zaptec transitions through intermediate states
-    # ('unknown', 'unavailable') when the car is first plugged in.  If we see
-    # one of those transitioning states, wait 3 seconds and re-read once before
-    # giving up — this lets the integration settle without the 5-min tick
-    # missing the connection event entirely.
+    # Race-condition tolerance: Zaptec transitions through 'unknown'/'unavailable'
+    # when the car is first plugged in.  Wait 3 s and re-read once before giving
+    # up so the connection event is not missed by the 5-min tick.
     zaptec_mode = state.get(CHARGER_MODE_ENT) or "unknown"
     if zaptec_mode not in CONNECTED_STATES:
         if zaptec_mode in ("unknown", "unavailable"):
@@ -388,8 +411,7 @@ def ev_control_loop():
     # ── Step 3: Deadline pressure — force ON, bypass hysteresis ───────────────
     # ev_deadline_pressure is True when slots_available <= slots_needed + 1,
     # meaning we cannot afford to wait for the next hysteresis window.
-    # set_charger() only calls resume_charging and updates last_state_change if
-    # the charger is not already ON — no spurious transitions when already charging.
+    # set_charger() skips the switch call if already charging — no spurious toggles.
     pressure = state.get(PRESSURE_ENT) or "off"
     if pressure == "on":
         slots_avail  = state.get(SLOTS_AVAIL_ENT)  or "?"
@@ -524,25 +546,21 @@ def ev_control_loop():
 # ── Startup: restore full current ─────────────────────────────────────────────
 
 @time_trigger("startup")
-def reset_zaptec_on_startup(**kwargs):
+def reset_charger_on_startup(**kwargs):
     """
-    Reset Zaptec to full circuit current on every HA startup.
+    Reset charger session current to CIRCUIT_MAX_AMPS on every HA startup.
 
-    If HA was restarted while the current was throttled to tariff-hour limits,
-    the charger would remain limited with no way to restore it without HA.
-    This ensures manual charging always works at full speed immediately after
-    startup, regardless of the throttle state at the time of the last shutdown.
+    If HA was restarted while the charger was throttled to tariff-hour limits,
+    the current limit would persist with no way to restore it without HA.
+    Uses the charger-level entity only — does not touch the installation.
 
-    task.sleep(10) lets the Zaptec integration finish loading before we send
+    task.sleep(15) lets the Zaptec integration finish loading before sending
     a command — sending too early may silently fail.
     """
-    task.sleep(10)
-    zaptec.limit_current(
-        installation_id   = ZAPTEC_INSTALL_ID,
-        available_current = CIRCUIT_MAX_AMPS,
-    )
+    task.sleep(15)
+    reset_to_full_current()
     log.info(
-        f"ev_control_loop: startup: Zaptec reset to full current "
+        f"ev_control_loop: startup: charger current reset to "
         f"{CIRCUIT_MAX_AMPS}A — ready for manual use"
     )
 

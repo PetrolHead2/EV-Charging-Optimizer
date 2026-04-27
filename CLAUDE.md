@@ -170,34 +170,57 @@ Key facts:
 - `today[0]` = midnight local Stockholm time
 - Tomorrow data typically becomes available around 13:00 local time
 
-## Zaptec Service Calls
+## Zaptec Device Structure
 
-```yaml
-# Start charging  (charger_id = Zaptec API UUID; NOT the HA device registry ID)
-service: zaptec.resume_charging
-data:
-  charger_id: d0775df2-6290-4569-bcd0-b579f8b9dde3
+Two separate Zaptec devices — each has distinct entities and distinct responsibilities:
 
-# Stop charging
-service: zaptec.stop_charging
-data:
-  charger_id: d0775df2-6290-4569-bcd0-b579f8b9dde3
+### Device 1: Zaptec Go "Laddbox" (charger / session level)
 
-# Throttle current  (installation-level; use installation_id, NOT device_id)
-service: zaptec.limit_current
-data:
-  installation_id: dcead66e-4c50-4763-bc17-6ef3efe8be1f
-  available_current: 10   # amps per phase, 0–25 (circuit max)
-```
+| Entity | Description |
+|--------|-------------|
+| `switch.laddbox_charging` | Session ON/OFF — **use this for start/stop** |
+| `number.laddbox_charger_max_current` | Per-session current limit (A); throttle here for tariff hours |
+| `number.laddbox_charger_min_current` | Per-session minimum current (A) |
+| `sensor.laddbox_charger_mode` | Charger state string (see states table below) |
+| `sensor.laddbox_charge_power` | Active session power (W) |
+| `sensor.laddbox_session_total_charge` | Energy delivered this session (kWh) |
+| `sensor.laddbox_allocated_charge_current` | Currently allocated current (A) |
+| `button.laddbox_resume_charging` | **Deprecated in control loop** — was unreliable; use switch instead |
+| `button.laddbox_stop_charging` | **Deprecated in control loop** — was unreliable; use switch instead |
 
-Zaptec integration: v0.8.6, entity prefix `laddbox`, Installation ID: `dcead66e-4c50-4763-bc17-6ef3efe8be1f`.
+### Device 2: Zaptec Installation "Magnus Niemi" (circuit level)
 
-**IMPORTANT — parameter names**: `resume_charging` / `stop_charging` take `charger_id` (Zaptec API UUID), NOT `device_id` (HA device registry). Using `device_id` causes "Unable to find device" errors. `limit_current` takes `installation_id` (Zaptec API UUID), NOT `device_id`. These are all Zaptec API identifiers — the HA internal device registry ID is different (`5a4975267833e4f5f8589c76831d4526`).
+| Entity | Description |
+|--------|-------------|
+| `number.magnus_niemi_available_current` | Circuit available current (A) — set via `zaptec.limit_current` |
+| `sensor.magnus_niemi_available_current_phase_1/2/3` | Per-phase read-back sensors |
+| `sensor.magnus_niemi_max_current` | Circuit maximum (25A) |
+| `sensor.magnus_niemi_network_type` | `tn_3_phase` |
 
-**Start/stop — button entities (current approach)**: The control loop now uses `button.press(entity_id="button.laddbox_resume_charging")` and `button.press(entity_id="button.laddbox_stop_charging")` instead of the deprecated `zaptec.resume_charging` / `zaptec.stop_charging` services. The button entities are `unavailable` when no car is connected — the connection guard in `ev_control_loop()` ensures no button press is attempted when the charger state is not in `CONNECTED_STATES`. `zaptec.limit_current` (installation-level current throttle) is NOT deprecated and is still used directly.
+Installation ID: `dcead66e-4c50-4763-bc17-6ef3efe8be1f` (Zaptec API UUID, used only by `zaptec.limit_current` if called from automations/Developer Tools — **not called from ev_control_loop.py**).
 
-`sensor.laddbox_charger_mode` values (full enum from Zaptec integration v0.8.x): `unknown`, `disconnected`, `connected_requesting`, `connected_charging`, `connected_finished`. Connected states = `{connected_requesting, connected_charging, connected_finished}`. The active charging state is `connected_charging` — not plain `charging`.
-`switch.laddbox_charging` is unavailable when charger_mode = `connected_finished` — use the service calls instead.
+**RULE: The control loop NEVER writes to magnus_niemi entities.** Circuit-level changes affect all appliances on the circuit. Tariff throttling is done session-level via `number.laddbox_charger_max_current` only.
+
+To reset the installation from the command line (if stuck): `curl -X POST [HA_URL]/api/services/zaptec/limit_current -H "Authorization: Bearer [TOKEN]" -H "Content-Type: application/json" -d '{"installation_id":"dcead66e-4c50-4763-bc17-6ef3efe8be1f","available_current":25}'`
+
+### `sensor.laddbox_charger_mode` state enum
+
+| State | Meaning | CONNECTED? |
+|-------|---------|------------|
+| `disconnected` | No car present | No |
+| `Disconnected` | Firmware alternate label | No |
+| `unknown` / `unavailable` | Transitioning | No (wait 3 s) |
+| `connected_requesting` | Car connected, awaiting start | Yes |
+| `Waiting` | Firmware alternate label for requesting | Yes |
+| `connected_charging` | Session active, delivering energy | Yes (charging) |
+| `Charging` | Firmware alternate label | Yes (charging) |
+| `connected_finished` | Session ended (BMS, stop cmd, or optimizer) | Yes |
+| `connected_finishing` | Session winding down | Yes |
+| `paused` | Session paused | Yes |
+
+Active charging states (`CHARGING_STATES`): `connected_charging`, `Charging`
+Chargeable states (`CHARGEABLE_STATES`): all "Yes" rows that are not charging
+`CONNECTED_STATES = CHARGEABLE_STATES | CHARGING_STATES`
 
 ## Architecture Summary
 
@@ -235,7 +258,7 @@ The **safety layer** (automations in `packages/ev_optimizer.yaml`) runs independ
 
 9. **configuration.yaml is root-owned**: All edits on debian require `sudo`. Use the SCP + sudo cp workflow. Avoid editing directly with `sudo nano` over SSH from a subagent (no TTY).
 
-10. **Zaptec start/stop use button entities, not service calls (2026-04-27)**: `ev_control_loop.py` now uses `button.press(entity_id="button.laddbox_resume_charging")` and `button.press(entity_id="button.laddbox_stop_charging")` for charging control. The deprecated `zaptec.resume_charging` / `zaptec.stop_charging` services raised `ValueError: Resume charging is not allowed if charger is not paused` when called in the wrong state. The button entities are managed by the Zaptec integration and handle state-validity checks internally. `zaptec.limit_current` (current throttle) is still called directly with `installation_id`. The safety automations in `ev_optimizer.yaml` still use `zaptec.stop_charging` service — these can be migrated to `button.laddbox_stop_charging` in a future update but currently continue to work.
+10. **Zaptec start/stop use `switch.laddbox_charging`, NOT button entities (2026-04-27)**: `ev_control_loop.py` uses `switch.turn_on/off(entity_id="switch.laddbox_charging")` for session control. Earlier iterations used the deprecated `zaptec.resume_charging` / `zaptec.stop_charging` services (raised `ValueError`), then tried `button.laddbox_resume_charging` / `button.laddbox_stop_charging` (remained `unavailable` 1-5 s after plug-in). The switch entity is the correct approach. Current throttling for tariff hours uses `number.laddbox_charger_max_current` (session-level) — never the installation-level `zaptec.limit_current`. The safety automations in `ev_optimizer.yaml` still use `zaptec.stop_charging` directly and continue to work.
 
 29. **Connection guard skips all Zaptec calls when no car connected (2026-04-27)**: `ev_control_loop()` checks `sensor.laddbox_charger_mode` against `CONNECTED_STATES = {connected_requesting, connected_charging, connected_finished}` before any other logic. If the state is `disconnected` or `unknown`, the function writes `"No car connected ({state})"` to `ev_decision_reason` and returns immediately — no Zaptec button or service is called. `on_zaptec_state_changed()` applies the same check: if the new state is not in `CONNECTED_STATES`, it updates the reason and returns without running the control loop. This prevents `button.press` calls against `unavailable` entities and eliminates spurious log noise on every 5-minute tick when the car is unplugged.
 
@@ -273,7 +296,7 @@ The **safety layer** (automations in `packages/ev_optimizer.yaml`) runs independ
 
 28. **Slot filter uses -900s lookback to include the currently-active slot (2026-04-27)**: `compute_schedule()` and `compute_opportunistic_schedule()` filter eligible slots with `start_ts >= now_ts - 900` (one full 15-minute slot duration) rather than `>= now_ts`. Without this, a recompute triggered 1 second after a Nordpool slot boundary (the `task.sleep(1)` in `on_price_update`) sets `now_ts = slot_start + 1` — the `>= now_ts` test then excludes the just-started slot, advancing the schedule window forward by 15 minutes on every price update. With the -900s lookback, the currently-active slot remains eligible for the entire 15 minutes it is running. Slots that have already fully elapsed are still excluded by the upper bound (`end_ts <= deadline_ts` / `end_ts <= horizon_ts`). The same lookback is applied in `compute_opportunistic_schedule()` using `s["start"].timestamp() >= now_ts - 900`.
 
-27. **Zaptec reset to full current on stop and startup (2026-04-26)**: `set_charger(False, ...)` always calls `zaptec.limit_current(installation_id=..., available_current=CIRCUIT_MAX_AMPS)` after issuing the stop command, whenever an actual ON→OFF transition fires (i.e. `on != current` and `on == False`). A separate `@time_trigger("startup")` function `reset_zaptec_on_startup()` (with `task.sleep(10)`) resets to full current on every HA reload/restart. This ensures that if HA becomes unreachable after a stop, or is restarted while the charger was throttled, a user can plug in and Zaptec will charge at full circuit speed (25A) automatically. The `ev_decision_reason` shows `| Zaptec reset to 25A` appended when a real stop transition fires. The reset only runs on an actual transition — repeated "already OFF" no-op ticks do not call `limit_current`.
+27. **Charger current reset to full on stop and startup (2026-04-27)**: `set_charger(False, ...)` always calls `reset_to_full_current()` (which sets `number.laddbox_charger_max_current = 25`) after a real ON→OFF transition. A separate `@time_trigger("startup")` function `reset_charger_on_startup()` (with `task.sleep(15)`) resets to 25A on every HA reload/restart. This ensures manual charging starts at full speed if HA was restarted while the charger was throttled. The ev_decision_reason shows `| current reset to 25A` appended when a real stop transition fires. The reset uses the charger-level entity only — the installation (magnus_niemi) is never touched by the control loop.
 
 18. **Schedule grid iframe card** (`/local/ev_schedule_grid.html`): The weekly departure grid is embedded as a `type: iframe` Lovelace card pointing to `/local/ev_schedule_grid.html`. In Docker HA, `/config/www/` maps to `/local/` for browser access. If the card shows blank, check: (a) the file exists at `/media/pi/NextCloud/homeassistant/www/ev_schedule_grid.html` on the host, (b) HA has served it at least once (try opening `https://[YOUR_HA_HOSTNAME]:8123/local/ev_schedule_grid.html` directly), (c) the `HA_TOKEN` constant in the file has been replaced with a valid long-lived access token.
 
