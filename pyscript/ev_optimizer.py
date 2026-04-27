@@ -26,8 +26,8 @@ Deadline arbitration — two distinct entities:
   input_datetime.ev_deadline          — human input only; never written by pyscript
   input_datetime.ev_computed_deadline — written only by pyscript (auto_set_deadline);
                                         never shown as an editable field in the UI
-  get_effective_deadline() arbitrates: manual deadline takes priority if it is in
-  the future; otherwise falls back to the computed deadline; else opportunistic mode.
+  get_effective_deadline() arbitrates: ALL valid future deadlines are candidates;
+  the NEAREST one wins — manual is not an override, it is an additional departure.
 
 Auto-deadline mode (input_boolean.ev_auto_deadline = on):
   Reads input_text.ev_weekly_schedule JSON every 5 minutes and writes the next
@@ -312,17 +312,37 @@ def get_effective_deadline():
             continue
         if ts > min_ahead:
             candidates.append((ts, label))
+            log.info(
+                f"ev_optimizer: get_effective_deadline: {label} candidate "
+                f"{datetime.fromtimestamp(ts, tz=TZ_LOCAL).strftime('%a %d %b %H:%M')}"
+            )
+        else:
+            log.debug(
+                f"ev_optimizer: get_effective_deadline: {label} deadline in past or "
+                f"< 5 min ahead — skipped"
+            )
 
     if not candidates:
-        log.debug("ev_optimizer: no valid deadline — opportunistic mode")
+        log.info("ev_optimizer: get_effective_deadline: no valid deadlines — opportunistic mode")
         return None, "opportunistic"
 
     nearest = min(candidates, key=lambda c: c[0])
-    log.info(
-        f"ev_optimizer: using {nearest[1]} deadline "
-        f"{datetime.fromtimestamp(nearest[0], tz=TZ_LOCAL).strftime('%a %d %b %H:%M')} "
-        f"(of {len(candidates)} candidate(s))"
-    )
+    if len(candidates) > 1:
+        others = [c for c in candidates if c is not nearest]
+        other_str = ", ".join(
+            [f"{c[1]} {datetime.fromtimestamp(c[0], tz=TZ_LOCAL).strftime('%a %d %b %H:%M')}"
+             for c in others]
+        )
+        log.info(
+            f"ev_optimizer: get_effective_deadline: nearest={nearest[1]} "
+            f"{datetime.fromtimestamp(nearest[0], tz=TZ_LOCAL).strftime('%a %d %b %H:%M')} "
+            f"| also: {other_str}"
+        )
+    else:
+        log.info(
+            f"ev_optimizer: get_effective_deadline: using {nearest[1]} "
+            f"{datetime.fromtimestamp(nearest[0], tz=TZ_LOCAL).strftime('%a %d %b %H:%M')}"
+        )
     return nearest[0], nearest[1]
 
 

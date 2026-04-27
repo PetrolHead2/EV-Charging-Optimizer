@@ -243,6 +243,13 @@
     </div>
     <div id="deadline-source" class="mode-badge">—</div>
   </div>
+  <div class="status-row" id="also-row" style="display:none">
+    <div>
+      <div class="status-label">Also</div>
+      <div class="status-value" id="also-departure">—</div>
+    </div>
+    <div id="also-source" class="mode-badge">—</div>
+  </div>
 
   <div class="toggle-row">
     <label class="pill-toggle">
@@ -336,6 +343,12 @@
       return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]} ${hh}:${mm}`;
     }
 
+    function badgeText(source) {
+      return source === 'manual' ? '📅 Manual' :
+             source === 'auto'   ? '🗓 Auto'   :
+                                   '🔮 Opportunistic';
+    }
+
     async function loadStatus() {
       const MIN_AHEAD_MS = 5 * 60 * 1000;   // 5 minutes
 
@@ -348,26 +361,40 @@
         const nowMs    = Date.now();
         const manualTs = (manualData.attributes?.timestamp ?? 0) * 1000;
         const autoTs   = (autoData.attributes?.timestamp   ?? 0) * 1000;
+
+        // Collect all valid future candidates, sort by nearest first
+        const candidates = [];
+        if (manualTs > nowMs + MIN_AHEAD_MS) candidates.push({ ts: manualTs, source: 'manual' });
+        if (autoTs   > nowMs + MIN_AHEAD_MS) candidates.push({ ts: autoTs,   source: 'auto'   });
+        candidates.sort((a, b) => a.ts - b.ts);
+
         const depEl    = document.getElementById("next-departure");
         const srcEl    = document.getElementById("deadline-source");
+        const alsoRow  = document.getElementById("also-row");
+        const alsoEl   = document.getElementById("also-departure");
+        const alsoSrc  = document.getElementById("also-source");
 
-        let statusText, statusSource;
-        if (manualTs > nowMs + MIN_AHEAD_MS) {
-          statusText   = formatDateTime(manualTs);
-          statusSource = 'manual';
-        } else if (autoTs > nowMs + MIN_AHEAD_MS) {
-          statusText   = formatDateTime(autoTs);
-          statusSource = 'auto';
+        if (candidates.length === 0) {
+          depEl.textContent = 'No deadline set';
+          srcEl.textContent = '🔮 Opportunistic';
+          srcEl.className   = 'mode-badge';
+          alsoRow.style.display = 'none';
         } else {
-          statusText   = 'No deadline set';
-          statusSource = 'none';
-        }
+          const nearest = candidates[0];
+          depEl.textContent = formatDateTime(nearest.ts);
+          srcEl.textContent = badgeText(nearest.source);
+          srcEl.className   = 'mode-badge' + (nearest.source === 'auto' ? ' auto' : '');
 
-        depEl.textContent = statusText;
-        srcEl.textContent = statusSource === 'manual' ? '📅 Manual' :
-                            statusSource === 'auto'   ? '🗓 Auto'   :
-                                                        '🔮 Opportunistic';
-        srcEl.className   = 'mode-badge' + (statusSource === 'auto' ? ' auto' : '');
+          if (candidates.length > 1) {
+            const second = candidates[1];
+            alsoEl.textContent  = formatDateTime(second.ts);
+            alsoSrc.textContent = badgeText(second.source);
+            alsoSrc.className   = 'mode-badge' + (second.source === 'auto' ? ' auto' : '');
+            alsoRow.style.display = '';
+          } else {
+            alsoRow.style.display = 'none';
+          }
+        }
       } catch (e) {
         document.getElementById("next-departure").textContent = "unavailable";
         console.warn("loadStatus (deadline):", e.message);
