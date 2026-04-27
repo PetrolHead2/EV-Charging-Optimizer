@@ -9,8 +9,10 @@ Triggers : Nordpool price update, deadline/target change, hourly failsafe,
            weekly schedule change, 5-min auto-deadline tick
 
 Price data structure (sensor.nordpool_kwh_se3_sek_3_10_025):
-  today[0..95]    – 96 floats, index 0 = 00:00 local time, step = 15 min, SEK/kWh
-  tomorrow[0..95] – same for next day (valid when tomorrow_valid == True)
+  raw_today    – list of 96 dicts {start, end, value}; 15-min slots, full 24 h
+  raw_tomorrow – same for next day (only valid when tomorrow_valid == True)
+  today/tomorrow – flat 24-entry hourly arrays; NOT used by _build_slots() because
+                   treating 24 hourly entries as 96×15-min indices caps coverage at 6 h
 
 Effective charging power is time-aware:
   - Tariff hours (06:00–22:00) with ev_tariff_guard_enabled on:
@@ -73,36 +75,62 @@ _DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 def _build_slots():
     """
-    Build full slot list from Nordpool today + tomorrow prices.
+    Build full slot list from Nordpool raw_today + raw_tomorrow prices.
+
+    Uses raw_today/raw_tomorrow (lists of dicts with start, end, value keys)
+    rather than the flat today/tomorrow price arrays.  The flat arrays contain
+    only 24 hourly entries; using them as 15-min slot indices (SLOT_MIN=15)
+    produced coverage of only 00:00–05:45 per day — slots after 06:00 were
+    absent from the pool entirely.  The raw attributes carry explicit UTC-aware
+    start/end timestamps for all 96 15-minute slots per day.
+
+    start/end may be pre-parsed datetime objects or ISO strings in pyscript —
+    both are handled transparently (same fix as get_slot_price in ev_control_loop).
 
     Returns list of dicts:
       {start (UTC datetime), end (UTC datetime), price (float SEK/kWh), idx (int)}
-    today[0]  → midnight local time
-    today[95] → 23:45 local time
+    Sorted by start time; idx is sequential position used by merge_into_windows().
     """
-    _attrs     = state.getattr(PRICE_ENT) or {}
-    today_px   = _attrs.get("today", [])   or []
-    tmrw_px    = _attrs.get("tomorrow", []) or []
-    tmrw_valid = _attrs.get("tomorrow_valid", False) or False
+    _attrs       = state.getattr(PRICE_ENT) or {}
+    raw_today    = _attrs.get("raw_today",    []) or []
+    raw_tomorrow = _attrs.get("raw_tomorrow", []) or []
+    tmrw_valid   = _attrs.get("tomorrow_valid", False) or False
 
-    local_now      = datetime.now(tz=TZ_LOCAL)
-    midnight_today = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    all_raw = raw_today + (raw_tomorrow if tmrw_valid else [])
 
+    log.info(
+        f"_build_slots: raw_today={len(raw_today)} "
+        f"raw_tomorrow={len(raw_tomorrow) if tmrw_valid else 0} "
+        f"(tomorrow_valid={tmrw_valid}) "
+        f"total_raw={len(all_raw)}"
+    )
+
+    local_tz = ZoneInfo(hass.config.time_zone)
     slots = []
-    days  = [(today_px, 0)]
-    if tmrw_valid and tmrw_px:
-        days.append((tmrw_px, 1))
+    for s in all_raw:
+        try:
+            start_raw = s["start"]
+            end_raw   = s["end"]
+            start = (datetime.fromisoformat(start_raw) if isinstance(start_raw, str)
+                     else start_raw).astimezone(timezone.utc)
+            end   = (datetime.fromisoformat(end_raw)   if isinstance(end_raw,   str)
+                     else end_raw).astimezone(timezone.utc)
+            price = float(s["value"])
+        except Exception as exc:
+            log.warning(f"ev_optimizer: _build_slots: skipping slot: {exc}")
+            continue
+        slots.append({"start": start, "end": end, "price": price})
 
-    for prices, day_off in days:
-        midnight = midnight_today + timedelta(days=day_off)
-        for i, price in enumerate(prices):
-            t0 = (midnight + timedelta(minutes=SLOT_MIN * i)).astimezone(timezone.utc)
-            slots.append({
-                "start": t0,
-                "end":   t0 + timedelta(minutes=SLOT_MIN),
-                "price": float(price),
-                "idx":   day_off * 96 + i,
-            })
+    slots.sort(key=lambda s: s["start"].timestamp())
+    for i, s in enumerate(slots):
+        s["idx"] = i
+
+    if slots:
+        log.info(
+            f"_build_slots: {len(slots)} valid slots "
+            f"{slots[0]['start'].astimezone(local_tz).strftime('%d %b %H:%M')} → "
+            f"{slots[-1]['end'].astimezone(local_tz).strftime('%d %b %H:%M')}"
+        )
     return slots
 
 
@@ -450,6 +478,16 @@ def compute_schedule(req_kwh, deadline_ts):
         f"  first={datetime.fromtimestamp(eligible[0]['start_ts'], local_tz).isoformat()}"
         f"  last_end={datetime.fromtimestamp(eligible[-1]['end_ts'], local_tz).isoformat()}"
     )
+
+    # Log cheapest 5 slots — makes it immediately visible whether tomorrow's
+    # prices are included and whether the cheapest available slots are correct.
+    cheapest_5 = sorted(eligible, key=lambda s: s["price"])[:5]
+    for s in cheapest_5:
+        log.info(
+            f"ev_optimizer: cheap slot: "
+            f"{s['start'].astimezone(local_tz).strftime('%d %b %H:%M')} "
+            f"price={s['price']:.3f} SEK/kWh"
+        )
 
     # Opportunistic: restrict candidate pool to ≤ median price slots
     if mode == "opportunistic":

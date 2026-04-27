@@ -154,15 +154,21 @@ input_text:
 
 ```python
 {
-  "today":          [float, ...],   # 96 values, index 0 = 00:00 local, step 15 min
+  "today":          [float, ...],   # 96 values, index 0 = 00:00 local, step 15 min (same data as raw_today values)
   "tomorrow":       [float, ...],   # 96 values (only valid when tomorrow_valid=True)
   "tomorrow_valid": bool,
-  "raw_today":      [{"start": "2026-04-24T00:00:00+02:00", "end": "...", "value": 0.521}, ...],
-  "raw_tomorrow":   [...],
+  "raw_today":      [{"start": "2026-04-24T00:00:00+02:00", "end": "2026-04-24T00:15:00+02:00", "value": 0.521}, ...],
+  "raw_tomorrow":   [...],          # 96 dicts, 15-min slots (same prices as tomorrow[], with explicit timestamps)
   "current_price":  float,          # current slot price
   ...
 }
 ```
+
+Key facts:
+- `today`/`tomorrow` flat arrays and `raw_today`/`raw_tomorrow` contain **identical price data** — both have 96 15-minute entries per day.
+- `_build_slots()` uses `raw_today`/`raw_tomorrow` (explicit UTC timestamps) rather than the flat arrays — this is more robust against indexing bugs and DST edge cases.
+- **Cheap afternoon slots outside the deadline are correctly excluded** — if tomorrow's departure is 09:00, slots at 15:00-16:00 (even at 0.08 SEK/kWh) are after the deadline and will not appear in the schedule. This is expected behavior, not a bug.
+- `compute_schedule()` logs the 5 cheapest eligible slots on every recompute at INFO level — check `home-assistant.log` with pyscript at DEBUG/INFO to verify pool contents.
 
 Key facts:
 - Prices are in SEK/kWh (raw, no tax)
