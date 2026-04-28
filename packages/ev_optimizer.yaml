@@ -175,11 +175,6 @@ automation:
           entity_id: input_text.ev_decision_reason
         data:
           value: "Safety stop: target energy reached"
-      - service: input_select.select_option
-        target:
-          entity_id: input_select.ev_charging_mode
-        data:
-          option: "Stop"
     mode: single
 
   # 2. Stop when the manual departure deadline has passed

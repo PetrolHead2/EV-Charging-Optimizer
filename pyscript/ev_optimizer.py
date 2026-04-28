@@ -947,17 +947,32 @@ def schedule_watchdog(**kwargs):
     it is lost on HA restart and may be empty if all triggers fired before
     Nordpool data was available. If the schedule is empty but a valid deadline
     exists, recompute immediately rather than waiting for the hourly failsafe.
+
+    Empty schedule is *expected* when the deadline is imminent (< 30 min) or
+    already passed — no eligible slots remain, so a recompute would find nothing
+    and fire the watchdog again on the next 15-min tick.  Skip silently.
     """
     sched = state.get(SCHEDULE_ENT)
     if sched not in (None, "unknown", "unavailable", "[]", ""):
         return   # schedule is present — nothing to do
     deadline_ts, source = get_effective_deadline()
-    if deadline_ts is not None:
-        log.warning(
-            f"ev_optimizer: watchdog — schedule empty but {source} deadline "
-            f"exists (ts={deadline_ts:.0f}), forcing recompute"
+    if deadline_ts is None:
+        return   # opportunistic mode — empty schedule is fine
+    now_ts = datetime.now(tz=TZ_LOCAL).timestamp()
+    secs_to_deadline = deadline_ts - now_ts
+    if secs_to_deadline < 1800:
+        log.debug(
+            f"ev_optimizer: watchdog — {source} deadline "
+            f"{'imminent in ' + str(int(secs_to_deadline / 60)) + ' min' if secs_to_deadline > 0 else 'already passed'}, "
+            f"empty schedule expected — skipping"
         )
-        ev_optimizer_recompute()
+        return
+    log.warning(
+        f"ev_optimizer: watchdog — schedule empty but {source} deadline "
+        f"exists in {int(secs_to_deadline / 60)} min (ts={deadline_ts:.0f}), "
+        f"forcing recompute"
+    )
+    ev_optimizer_recompute()
 
 
 @time_trigger("startup")
