@@ -898,6 +898,8 @@ def on_price_update(var_name=None, value=None, old_value=None, **kwargs):
     log.info(f"ev_optimizer: Nordpool updated to {value} SEK/kWh, recomputing")
     task.sleep(1)
     ev_optimizer_recompute()
+    task.sleep(1)   # let sensor.ev_schedule settle after recompute
+    ev_control_loop()   # act on new schedule immediately
 
 
 @state_trigger("input_text.ev_weekly_schedule")
