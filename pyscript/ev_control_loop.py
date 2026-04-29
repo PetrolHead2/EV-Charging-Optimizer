@@ -37,7 +37,7 @@ Priority chain (evaluated top-to-bottom):
                             if should_hold + forced_on → OFF + combined reason
                             if should_hold only        → OFF + guard reason
   5. No schedule          → if forced_on: force ON; else safe OFF
-  6. Deadline pressure    → force ON with hysteresis (guard already cleared)
+  6. Deadline pressure    → force ON, NO hysteresis (guard cleared, hard override)
   7. In window            → ON  (subject to hysteresis)
   8. Outside window       → OFF (subject to hysteresis)
 """
@@ -595,7 +595,7 @@ def ev_control_loop():
                                 price-aware latest-start: if should_hold + forced_on
                                 → OFF with combined reason; else → OFF with guard reason
     5. No schedule available  → if forced_on: force ON; else safe OFF
-    6. Deadline pressure      → force ON — guard cleared at step 4, hysteresis applies
+    6. Deadline pressure      → force ON — guard cleared at step 4, NO hysteresis
     7. Inside scheduled window  → ON  (subject to hysteresis)
     8. Outside scheduled window → OFF (subject to hysteresis)
     """
@@ -729,7 +729,9 @@ def ev_control_loop():
 
     # ── Step 6: Deadline pressure — force ON (consumption guard cleared) ──────
     # Consumption guard passed at step 4, so it is safe to start charging.
-    # Hysteresis still applies to avoid rapid toggling.
+    # Hysteresis is NOT checked here — deadline pressure is a hard override.
+    # The system must start charging immediately when time is running out,
+    # regardless of how recently the last state change occurred.
     if forced_on:
         pressure_reason = (
             f"Deadline pressure: forced ON "
@@ -737,17 +739,8 @@ def ev_control_loop():
         )
         log.info(
             f"ev_control_loop: Priority step 6: deadline pressure → ON "
-            f"({slots_avail} slots avail, {slots_needed} needed)"
+            f"(bypassing hysteresis — {slots_avail} slots avail, {slots_needed} needed)"
         )
-        if not check_hysteresis(True):
-            current_on  = _is_charging()
-            hold_reason = (
-                f"Hysteresis: holding {'ON' if current_on else 'OFF'} "
-                f"(min {HYSTERESIS_MINUTES} min) | {pressure_reason}"
-            )
-            input_text.set_value(entity_id=REASON_ENT, value=hold_reason[:255])
-            log.debug(f"ev_control_loop: {hold_reason}")
-            return
         set_charger(True, pressure_reason)
         return
 
