@@ -587,17 +587,18 @@ def ev_control_loop():
 
     Priority chain (evaluated top-to-bottom):
 
-    0. Car not connected      → update reason, return immediately; no switch calls
-    1. Mode = "Stop"          → always OFF — no exceptions, no hysteresis
-    2. Mode = "Charge now"    → always ON  — no exceptions, no hysteresis
-    3. Deadline pressure      → set forced_on flag — do NOT return yet
-    4. Consumption guard      → ALWAYS runs (even with deadline pressure)
-                                price-aware latest-start: if should_hold + forced_on
-                                → OFF with combined reason; else → OFF with guard reason
-    5. No schedule available  → if forced_on: force ON; else safe OFF
-    6. Deadline pressure      → force ON — guard cleared at step 4, NO hysteresis
-    7. Inside scheduled window  → ON  (subject to hysteresis)
-    8. Outside scheduled window → OFF (subject to hysteresis)
+    0. Car not connected        → update reason, return immediately; no switch calls
+    1. Mode = "Stop"            → always OFF — no exceptions, no hysteresis
+    2. Mode = "Charge now"      → always ON  — no exceptions, no hysteresis
+    3. Deadline pressure        → set forced_on flag — do NOT return yet
+    4. No schedule available    → if forced_on: force ON; else safe OFF
+    5. Evaluate schedule        → compute desired=True/False via should_charge_now()
+    6. Outside window, no pressure → OFF with hysteresis; guard SKIPPED (not charging)
+    7. Consumption guard        → only reached when desired=True or forced_on=True
+                                   price-aware latest-start: if should_hold + forced_on
+                                   → OFF with combined reason; else → OFF with guard reason
+    8. Deadline pressure        → force ON — guard cleared at step 7, NO hysteresis
+    9. Inside scheduled window  → ON  (subject to hysteresis)
     """
     # ── Step 0: Connection guard — no car, no switch calls ────────────────────
     # switch.laddbox_charging is unavailable when no car is connected.
@@ -666,7 +667,77 @@ def ev_control_loop():
     else:
         log.info("ev_control_loop: Priority step 3: no deadline pressure")
 
-    # ── Step 4: Consumption guard — always runs, even during deadline pressure ──
+    # ── Step 4: No schedule — safe default ────────────────────────────────────
+    # Always read fresh from sensor state — never use a cached value.
+    schedule = get_schedule()
+
+    if not isinstance(schedule, list) or len(schedule) == 0:
+        log.info("ev_control_loop: Priority step 4: no schedule available")
+        if forced_on:
+            pressure_reason = (
+                f"Deadline pressure: forced ON — no schedule "
+                f"({slots_avail} slots available, {slots_needed} needed)"
+            )
+            set_charger(True, pressure_reason)
+            return
+        if _is_charging():
+            set_charger(False, "No schedule available — stopping unauthorised charge")
+        else:
+            input_text.set_value(
+                entity_id=REASON_ENT,
+                value="No schedule available — charger already off",
+            )
+            log.debug("ev_control_loop: no schedule, charger already off — no action")
+        return
+
+    # ── Step 5: Evaluate schedule ─────────────────────────────────────────────
+    desired   = should_charge_now(schedule)
+    price_str = _current_price_str()
+
+    # Read deadline info published by ev_optimizer into sensor.ev_schedule attrs
+    sched_attrs = state.getattr(SCHEDULE_ENT) or {}
+    dl_source   = sched_attrs.get("deadline_source") or "opportunistic"
+    dl_ts       = sched_attrs.get("deadline_ts")
+
+    log.info(
+        f"ev_control_loop: Priority step 5: "
+        f"should_charge_now={desired}"
+    )
+    if desired:
+        schedule_reason = f"In scheduled window ({price_str})"
+    else:
+        if dl_ts and dl_source != "opportunistic":
+            try:
+                dl_str = datetime.fromtimestamp(float(dl_ts), tz=TZ_LOCAL).strftime("%a %d %b %H:%M")
+                schedule_reason = f"Outside scheduled windows ({price_str}) — deadline: {dl_source} {dl_str}"
+            except Exception:
+                schedule_reason = f"Outside scheduled windows ({price_str})"
+        else:
+            schedule_reason = f"Outside scheduled windows ({price_str})"
+
+    # ── Step 6: Outside window, no deadline pressure → OFF, skip guard ────────
+    # The consumption guard must NEVER run when desired=False — it would produce
+    # misleading "optimal start at HH:MM" messages when the optimizer has already
+    # decided not to charge because prices are expensive or outside a window.
+    if not desired and not forced_on:
+        log.info(
+            f"ev_control_loop: Priority step 6: "
+            f"outside scheduled window — skipping guard, going OFF"
+        )
+        if not check_hysteresis(False):
+            current_on  = _is_charging()
+            hold_reason = (
+                f"Hysteresis: holding {'ON' if current_on else 'OFF'} "
+                f"(min {HYSTERESIS_MINUTES} min between state changes, {price_str})"
+            )
+            input_text.set_value(entity_id=REASON_ENT, value=hold_reason[:255])
+            log.debug(f"ev_control_loop: {hold_reason}")
+            return
+        set_charger(False, schedule_reason)
+        return
+
+    # ── Step 7: Consumption guard ─────────────────────────────────────────────
+    # Only reached when desired=True or forced_on=True (wanting to charge).
     # Price-aware latest-start: calculates the optimal window end-of-hour and
     # compares current vs next-hour Nordpool price to decide whether to wait
     # in this hour or skip to the next. Fail-open when Tibber is unavailable.
@@ -690,45 +761,22 @@ def ev_control_loop():
                     f"{guard_reason}"
                 )
             log.info(
-                f"ev_control_loop: Priority step 4: "
+                f"ev_control_loop: Priority step 7: "
                 f"guard holds despite deadline — {combined_reason}"
             )
             set_charger(False, combined_reason[:255])
         else:
             log.info(
-                f"ev_control_loop: Priority step 4: "
+                f"ev_control_loop: Priority step 7: "
                 f"consumption guard holding — {guard_reason}"
             )
             set_charger(False, guard_reason[:255])
         return
 
-    log.info("ev_control_loop: Priority step 4: consumption guard OK — charging allowed")
+    log.info("ev_control_loop: Priority step 7: consumption guard OK — charging allowed")
 
-    # ── Step 5: No schedule — safe default ────────────────────────────────────
-    # Always read fresh from sensor state — never use a cached value.
-    schedule = get_schedule()
-
-    if not isinstance(schedule, list) or len(schedule) == 0:
-        log.info("ev_control_loop: Priority step 5: no schedule available")
-        if forced_on:
-            pressure_reason = (
-                f"Deadline pressure: forced ON — no schedule "
-                f"({slots_avail} slots available, {slots_needed} needed)"
-            )
-            set_charger(True, pressure_reason)
-            return
-        if _is_charging():
-            set_charger(False, "No schedule available — stopping unauthorised charge")
-        else:
-            input_text.set_value(
-                entity_id=REASON_ENT,
-                value="No schedule available — charger already off",
-            )
-            log.debug("ev_control_loop: no schedule, charger already off — no action")
-        return
-
-    # ── Step 6: Deadline pressure — force ON (consumption guard cleared) ──────
-    # Consumption guard passed at step 4, so it is safe to start charging.
+    # ── Step 8: Deadline pressure — force ON (consumption guard cleared) ──────
+    # Consumption guard passed at step 7, so it is safe to start charging.
     # Hysteresis is NOT checked here — deadline pressure is a hard override.
     # The system must start charging immediately when time is running out,
     # regardless of how recently the last state change occurred.
@@ -738,39 +786,16 @@ def ev_control_loop():
             f"({slots_avail} slots available, {slots_needed} needed)"
         )
         log.info(
-            f"ev_control_loop: Priority step 6: deadline pressure → ON "
+            f"ev_control_loop: Priority step 8: deadline pressure → ON "
             f"(bypassing hysteresis — {slots_avail} slots avail, {slots_needed} needed)"
         )
         set_charger(True, pressure_reason)
         return
 
-    # ── Steps 7 & 8: Normal schedule following ─────────────────────────────────
-    desired   = should_charge_now(schedule)
-    price_str = _current_price_str()
+    # ── Step 9: Inside scheduled window — ON with hysteresis ──────────────────
+    log.info(f"ev_control_loop: Priority step 9: in scheduled window → ON")
 
-    # Read deadline info published by ev_optimizer into sensor.ev_schedule attrs
-    sched_attrs = state.getattr(SCHEDULE_ENT) or {}
-    dl_source   = sched_attrs.get("deadline_source") or "opportunistic"
-    dl_ts       = sched_attrs.get("deadline_ts")
-
-    log.info(
-        f"ev_control_loop: Priority step {'7' if desired else '8'}: "
-        f"should_charge_now={desired} → {'ON' if desired else 'OFF'}"
-    )
-    if desired:
-        reason = f"In scheduled window ({price_str})"
-    else:
-        if dl_ts and dl_source != "opportunistic":
-            try:
-                dl_str = datetime.fromtimestamp(float(dl_ts), tz=TZ_LOCAL).strftime("%a %d %b %H:%M")
-                reason = f"Outside scheduled windows ({price_str}) — deadline: {dl_source} {dl_str}"
-            except Exception:
-                reason = f"Outside scheduled windows ({price_str})"
-        else:
-            reason = f"Outside scheduled windows ({price_str})"
-
-    # ── Hysteresis guard (steps 7 & 8 only) ───────────────────────────────────
-    if not check_hysteresis(desired):
+    if not check_hysteresis(True):
         current_on  = _is_charging()
         hold_reason = (
             f"Hysteresis: holding {'ON' if current_on else 'OFF'} "
@@ -781,7 +806,7 @@ def ev_control_loop():
         return
 
     # ── Act ───────────────────────────────────────────────────────────────────
-    set_charger(desired, reason)
+    set_charger(True, schedule_reason)
 
 
 # ── Startup: restore full current ─────────────────────────────────────────────
