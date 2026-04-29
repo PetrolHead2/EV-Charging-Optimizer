@@ -98,12 +98,20 @@ def _build_slots():
 
     all_raw = raw_today + (raw_tomorrow if tmrw_valid else [])
 
-    log.info(
-        f"_build_slots: raw_today={len(raw_today)} "
-        f"raw_tomorrow={len(raw_tomorrow) if tmrw_valid else 0} "
-        f"(tomorrow_valid={tmrw_valid}) "
-        f"total_raw={len(all_raw)}"
-    )
+    if not tmrw_valid:
+        log.warning(
+            "ev_optimizer: _build_slots: tomorrow_valid=False "
+            "— raw_tomorrow excluded from slot pool. "
+            "If deadline > 24h this may force suboptimal slots. "
+            f"raw_today slots: {len(raw_today)}"
+        )
+    else:
+        log.info(
+            f"ev_optimizer: _build_slots: "
+            f"raw_today={len(raw_today)} slots "
+            f"raw_tomorrow={len(raw_tomorrow)} slots "
+            f"total={len(all_raw)} slots"
+        )
 
     local_tz = ZoneInfo(hass.config.time_zone)
     slots = []
@@ -969,6 +977,19 @@ def schedule_watchdog(**kwargs):
             f"ev_optimizer: watchdog — {source} deadline "
             f"{'imminent in ' + str(int(secs_to_deadline / 60)) + ' min' if secs_to_deadline > 0 else 'already passed'}, "
             f"empty schedule expected — skipping"
+        )
+        return
+    rem_raw = state.get(REM_KWH_ENT)
+    try:
+        rem_kwh = float(rem_raw) if rem_raw not in (
+            None, "unknown", "unavailable") else 999.0
+    except (ValueError, TypeError):
+        rem_kwh = 999.0
+    if rem_kwh <= 0.2:
+        log.debug(
+            f"ev_optimizer: watchdog — target met "
+            f"(remaining={rem_kwh:.2f} kWh ≤ 0.2), "
+            f"empty schedule expected — skipping recompute"
         )
         return
     log.warning(
