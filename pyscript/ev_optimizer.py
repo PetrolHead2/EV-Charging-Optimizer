@@ -878,7 +878,7 @@ def on_input_changed(var_name=None, value=None, old_value=None, **kwargs):
     # Fire the control loop immediately so an active window or deadline
     # pressure takes effect within seconds rather than waiting up to 5 min.
     task.sleep(1)   # let sensor.ev_schedule state settle after recompute
-    ev_control_loop()
+    pyscript.ev_control_loop()
 
 
 @state_trigger("sensor.nordpool_kwh_se3_sek_3_10_025")
@@ -899,7 +899,7 @@ def on_price_update(var_name=None, value=None, old_value=None, **kwargs):
     task.sleep(1)
     ev_optimizer_recompute()
     task.sleep(1)   # let sensor.ev_schedule settle after recompute
-    ev_control_loop()   # act on new schedule immediately
+    pyscript.ev_control_loop()   # act on new schedule immediately
 
 
 @state_trigger("input_text.ev_weekly_schedule")

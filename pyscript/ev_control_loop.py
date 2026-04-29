@@ -578,9 +578,18 @@ def check_consumption_guard():
 
 # ── Main control loop ──────────────────────────────────────────────────────────
 
+@service
 def ev_control_loop():
     """
-    Core EV charging decision function.  Plain callable — no trigger decorators.
+    Core EV charging decision function.
+
+    The @service decorator registers this function in pyscript's shared global
+    namespace so it can be called cross-file from ev_optimizer.py
+    (on_price_update, on_input_changed).  Without @service, pyscript only
+    exposes decorated trigger/service functions across files — plain helpers
+    are invisible to other files at call time.
+
+    Also callable as HA service pyscript.ev_control_loop for manual testing.
 
     Called by ev_control_loop_tick() (5-min schedule + startup) and by
     on_zaptec_state_changed() (immediately on any charger state transition).
