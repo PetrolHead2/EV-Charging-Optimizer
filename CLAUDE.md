@@ -1,496 +1,236 @@
 # EV Charging Optimizer — Project Reference
 
-## Infrastructure
+## Infrastructure & Files
 
 | Item | Value |
 |------|-------|
-| HA host | `debian` (SSH user: `pi`, password: `eankod89`) |
+| HA host | `debian` · SSH `pi@debian` · sudo pw `eankod89` |
 | HA container | `homeassistant` (Docker) |
 | HA version | 2026.4.3 |
 | HA URL | https://koffern.duckdns.org:8123/ |
+| HA token | `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI5N2U2MDM3OWY2ZGI0Yjg5OWFhMWIyZWJmYWQ4MGRlYSIsImlhdCI6MTc3NzAyMzk4OSwiZXhwIjoyMDkyMzgzOTg5fQ.jowul0Q2pQq0t27x6CvXPKHbq8ifh1-gfRe8iM9QEOo` |
+| Timezone | Europe/Stockholm (use HA's timezone) |
+| Nordpool region | SE3, SEK/kWh |
 | Config dir (host) | `/media/pi/NextCloud/homeassistant` |
 | Config dir (container) | `/config` |
-| Timezone | Europe/Stockholm | Use home assistants time zone instead
-| Nordpool region | SE3, SEK/kWh |
+| Repo | https://github.com/PetrolHead2/EV-Charging-Optimizer |
 
-All HA config files are owned by root. Use `echo eankod89 | sudo -S` for writes on debian.
-
-To restart HA: `ssh pi@debian "docker restart homeassistant"`
-
-To reload pyscript without restart: call service `pyscript.reload` via HA API or Developer Tools.
-
-To reload input helpers: call `input_datetime/reload`, `input_number/reload`, `input_select/reload`, `input_text/reload` individually — `homeassistant/reload_all` does NOT reload these domains.
-
-Connect to HA at https:///koffern.duckdns.org:8123/ using the long-lived token eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI5N2U2MDM3OWY2ZGI0Yjg5OWFhMWIyZWJmYWQ4MGRlYSIsImlhdCI6MTc3NzAyMzk4OSwiZXhwIjoyMDkyMzgzOTg5fQ.jowul0Q2pQq0t27x6CvXPKHbq8ifh1-gfRe8iM9QEOo
-
-the home assistant is a docker installation on the machine "debian" wich is ssh accessable with user "pi" and password "eankod89" where every a password is needed start with trying "eankod89"
-[YOUR_SSH_PASSWORD]=eankod89
-[YOUR_HA_HOST]=debian
-[YOUR_HA_HOSTNAME]=koffern.duckdns.org
-HA_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI5N2U2MDM3OWY2ZGI0Yjg5OWFhMWIyZWJmYWQ4MGRlYSIsImlhdCI6MTc3NzAyMzk4OSwiZXhwIjoyMDkyMzgzOTg5fQ.jowul0Q2pQq0t27x6CvXPKHbq8ifh1-gfRe8iM9QEOo
-
-
-## Project Files
-
-| File (host path) | Purpose |
-|-----------------|---------|
-| `/media/pi/NextCloud/homeassistant/configuration.yaml` | Main HA config — enables pyscript, packages, and input helpers |
-| `/media/pi/NextCloud/homeassistant/packages/ev_optimizer.yaml` | Template sensors + safety automations (HA package) |
-| `/media/pi/NextCloud/homeassistant/pyscript/ev_optimizer.py` | Schedule computation service |
-| `/media/pi/NextCloud/homeassistant/pyscript/ev_control_loop.py` | 5-minute control loop |
-| `/media/pi/NextCloud/homeassistant/www/ev_schedule_grid.html` | Lovelace iframe card for weekly departure schedule grid. **Contains `HA_TOKEN` — do not commit to version control.** |
-| `/media/pi/NextCloud/homeassistant/pyscript/ev_schedule_data.json` | Persisted weekly departure schedule (written on every change, read on startup to restore `input_text.ev_weekly_schedule`). |
-
-Local working copies (for editing before SCP transfer):
-- `/tmp/ev_optimizer_pkg.yaml`
-- `/tmp/ev_optimizer.py`
-- `/tmp/ev_control_loop.py`
-- `/tmp/ev_schedule_grid.html`
-
-**Editing workflow** (files are root-owned on debian):
+Config files are root-owned. Editing workflow:
 ```bash
-# Edit locally, then:
-sshpass -p [YOUR_SSH_PASSWORD] scp /tmp/myfile.py pi@[YOUR_HA_HOST]:/tmp/
-ssh pi@[YOUR_HA_HOST] "echo [YOUR_SSH_PASSWORD] | sudo -S cp /tmp/myfile.py /media/pi/NextCloud/homeassistant/pyscript/"
+sshpass -p eankod89 scp /tmp/file.py pi@debian:/tmp/
+ssh pi@debian "echo eankod89 | sudo -S cp /tmp/file.py /media/pi/NextCloud/homeassistant/pyscript/"
 ```
 
-### configuration.yaml additions
-```yaml
-pyscript:
-  allow_all_imports: true
-  hass_is_global: true
+Reload helpers individually — `homeassistant/reload_all` does NOT reload `input_datetime`, `input_number`, `input_select`, `input_text`.
 
-homeassistant:
-  packages: !include_dir_named packages
+Sync to repo: `cd ~/projects/EV-Charging-Optimizer && ./sync_from_ha.sh && git add . && git commit -m "..." && git push`
+`sync_from_ha.sh` scrubs `HA_TOKEN` from the HTML copy. **Never commit the real token.**
 
-input_datetime:
-  ev_deadline:
-    name: EV Departure Deadline
-    has_date: true
-    has_time: true
-  ev_last_state_change:
-    name: EV Last Charger State Change
-    has_date: true
-    has_time: true
+| Host path (under `/media/pi/NextCloud/homeassistant/`) | Purpose |
+|-------------------------------------------------------|---------|
+| `configuration.yaml` | Main HA config — pyscript, packages, input helpers |
+| `packages/ev_optimizer.yaml` | Template sensors + safety automations |
+| `pyscript/ev_optimizer.py` | Schedule computation service |
+| `pyscript/ev_control_loop.py` | 5-minute control loop |
+| `www/ev_schedule_grid.html` | Lovelace iframe — **contains HA_TOKEN, do not commit** |
+| `pyscript/ev_schedule_data.json` | Persisted weekly schedule JSON |
 
-input_number:
-  ev_required_kwh:
-    name: EV Required kWh
-    min: 0
-    max: 40
-    step: 0.5
-    unit_of_measurement: kWh
-
-input_select:
-  ev_charging_mode:
-    name: EV Charging Mode
-    options:
-      - Smart
-      - Charge now
-      - Stop
-    initial: Smart
-
-input_text:
-  ev_decision_reason:
-    name: EV Decision Reason
-    max: 255
-```
+Local working copies: `/tmp/ev_optimizer_pkg.yaml`, `/tmp/ev_optimizer.py`, `/tmp/ev_control_loop.py`, `/tmp/ev_schedule_grid.html`
 
 ## Entity Reference
 
-### Physical / Integration Entities
+### Physical / Integration
 
 | Entity | Description | Unit |
 |--------|-------------|------|
-| `sensor.nordpool_kwh_se3_sek_3_10_025` | Nordpool electricity price | SEK/kWh |
-| `sensor.laddbox_charge_power` | Zaptec charger active power | W |
-| `sensor.laddbox_session_total_charge` | Energy delivered this session | kWh |
+| `sensor.nordpool_kwh_se3_sek_3_10_025` | Nordpool price | SEK/kWh |
+| `sensor.laddbox_charge_power` | Charger active power | W |
+| `sensor.laddbox_session_total_charge` | Energy this session | kWh |
 | `sensor.laddbox_charger_mode` | Charger state string | — |
-| `switch.laddbox_charging` | Charging on/off switch | — |
-| `number.laddbox_charger_max_current` | Current limit | A (0–25) |
+| `switch.laddbox_charging` | **Session ON/OFF — use for start/stop** | — |
+| `number.laddbox_charger_max_current` | Session current limit | A (0–25) |
+| `sensor.laddbox_allocated_charge_current` | Allocated current | A |
+| `number.magnus_niemi_available_current` | Circuit available current (**NEVER written by control loop**) | A |
 | `sensor.jbb78w_state_of_charge` | Mercedes battery SoC | % |
 | `binary_sensor.jbb78w_charging_active` | Car reports active charging | on/off |
-| `sensor.jbb78w_charging_status` | Car charging status string | — |
 | `sensor.tibber_pulse_dianavagen_15_power` | House total power | W |
-| `sensor.tibber_pulse_dianavagen_15_accumulated_consumption_current_hour` | kWh consumed since start of current hour | kWh |
-| `sensor.tibber_pulse_dianavagen_15_average_power` | Whole-house average draw (W) — used by consumption guard | W |
+| `sensor.tibber_pulse_dianavagen_15_accumulated_consumption_current_hour` | kWh since hour start | kWh |
+| `sensor.tibber_pulse_dianavagen_15_average_power` | House average draw (consumption guard) | W |
 
-### Input Helpers (created by this project)
+### Input Helpers
 
 | Entity | Description |
 |--------|-------------|
-| `input_datetime.ev_deadline` | Departure deadline for charge target |
-| `input_datetime.ev_last_state_change` | Timestamp of last charger on/off transition |
-| `input_number.ev_required_kwh` | Energy needed for next trip (0 = auto from SoC) |
-| `input_select.ev_charging_mode` | Smart / Charge now / Stop |
-| `input_text.ev_decision_reason` | Human-readable last decision (255 chars) |
+| `input_datetime.ev_deadline` | **Human input only** — manual departure override (set `2000-01-01` to clear) |
+| `input_datetime.ev_computed_deadline` | **Pyscript only** — next departure from weekly schedule |
+| `input_datetime.ev_last_state_change` | Last charger on/off transition timestamp |
+| `input_number.ev_required_kwh` | Energy target (0 = auto from SoC) |
 | `input_number.ev_max_hourly_kwh` | Hourly consumption cap for tariff guard (kWh, default 5.0) |
-| `input_number.ev_max_tariff_power_kw` | Max charge power during tariff hours (kW, default 3.0) |
+| `input_number.ev_max_tariff_power_kw` | Max charge power during tariff hours (kW; 0 = disabled) |
+| `input_select.ev_charging_mode` | Smart / Charge now / Stop |
+| `input_text.ev_decision_reason` | Human-readable last decision (max 255 chars) |
+| `input_text.ev_weekly_schedule` | JSON weekly departure schedule, max 255 chars e.g. `{"mon":["08:00"],...}` |
 | `input_boolean.ev_tariff_guard_enabled` | Enable/disable both tariff guards (default on) |
 | `input_boolean.ev_auto_deadline` | Enable auto-deadline from weekly schedule (default on) |
-| `input_text.ev_weekly_schedule` | JSON weekly departure schedule, max 255 chars (e.g. `{"mon":["08:00","18:00"],"sat":[],...}`) |
-| `input_datetime.ev_deadline` | **Human input only** — manual departure override; leave at past/sentinel for fully automatic operation. Pyscript never writes this entity. |
-| `input_datetime.ev_computed_deadline` | **Pyscript only** — next departure computed from weekly schedule by `auto_set_deadline()`; never shown as an editable field. `get_effective_deadline()` treats this as a candidate alongside `ev_deadline`; the nearest of all valid future deadlines wins. |
+| `input_boolean.ev_consumption_guard_active` | Dormant cooldown indicator (never written by guard code) |
 
-### Computed Template Sensors (packages/ev_optimizer.yaml)
+### Computed Sensors (`packages/ev_optimizer.yaml`)
 
 | Entity | Description | Unit |
 |--------|-------------|------|
-| `sensor.ev_charging_power_kw` | Active charge power (defaults to 7 kW when idle) | kW |
+| `sensor.ev_charging_power_kw` | Active charge power (defaults 7 kW when idle) | kW |
 | `sensor.ev_remaining_kwh` | kWh still needed to reach target | kWh |
-| `sensor.ev_slots_needed` | 15-min slots needed to deliver remaining kWh | slots |
-| `sensor.ev_slots_available` | 15-min slots until deadline (999 if no deadline) | slots |
-| `binary_sensor.ev_deadline_pressure` | True when deadline set AND slots_needed > 0 AND slots_available <= slots_needed + 1 | — |
-
-### Optimizer Output
-
-| Entity | Description |
-|--------|-------------|
-| `sensor.ev_schedule` | State = JSON list of charging windows; rich attributes |
-
-## Nordpool Price Data Structure
-
-`state.getattr("sensor.nordpool_kwh_se3_sek_3_10_025")` returns:
-
-```python
-{
-  "today":          [float, ...],   # 96 values, index 0 = 00:00 local, step 15 min (same data as raw_today values)
-  "tomorrow":       [float, ...],   # 96 values (only valid when tomorrow_valid=True)
-  "tomorrow_valid": bool,
-  "raw_today":      [{"start": "2026-04-24T00:00:00+02:00", "end": "2026-04-24T00:15:00+02:00", "value": 0.521}, ...],
-  "raw_tomorrow":   [...],          # 96 dicts, 15-min slots (same prices as tomorrow[], with explicit timestamps)
-  "current_price":  float,          # current slot price
-  ...
-}
-```
-
-Key facts:
-- `today`/`tomorrow` flat arrays and `raw_today`/`raw_tomorrow` contain **identical price data** — both have 96 15-minute entries per day.
-- `_build_slots()` uses `raw_today`/`raw_tomorrow` (explicit UTC timestamps) rather than the flat arrays — this is more robust against indexing bugs and DST edge cases.
-- **Cheap afternoon slots outside the deadline are correctly excluded** — if tomorrow's departure is 09:00, slots at 15:00-16:00 (even at 0.08 SEK/kWh) are after the deadline and will not appear in the schedule. This is expected behavior, not a bug.
-- `compute_schedule()` logs the 5 cheapest eligible slots on every recompute at INFO level — check `home-assistant.log` with pyscript at DEBUG/INFO to verify pool contents.
-- `_build_slots()` logs at **WARNING** when `tomorrow_valid=False` (raw_tomorrow excluded from pool) — if a deadline is > 24h away this may force suboptimal slot selection. Logs at INFO when `tomorrow_valid=True` (both days available). Tomorrow data typically becomes available around 13:00 local time.
-
-Key facts:
-- Prices are in SEK/kWh (raw, no tax)
-- Negative prices are possible (overnight solar surplus)
-- `today[0]` = midnight local Stockholm time
-- Tomorrow data typically becomes available around 13:00 local time
+| `sensor.ev_slots_needed` | 15-min slots needed (cap-aware during tariff hours) | slots |
+| `sensor.ev_slots_available` | 15-min slots until deadline (999 = no deadline) | slots |
+| `binary_sensor.ev_deadline_pressure` | True when deadline set AND slots_needed > 0 AND slots_available ≤ slots_needed+1 | — |
+| `sensor.ev_schedule` | State = compact epoch JSON `[{"s":ts,"e":ts},...]`; `attributes.schedule` has full ISO windows | — |
 
 ## Zaptec Device Structure
 
-Two separate Zaptec devices — each has distinct entities and distinct responsibilities:
+**Device 1 — Zaptec Go "Laddbox"** (session level): use `switch.laddbox_charging` for ON/OFF, `number.laddbox_charger_max_current` for current throttling. Deprecated: `button.laddbox_resume_charging`, `button.laddbox_stop_charging` (unreliable).
 
-### Device 1: Zaptec Go "Laddbox" (charger / session level)
+**Device 2 — "Magnus Niemi"** (circuit level): installation ID `dcead66e-4c50-4763-bc17-6ef3efe8be1f`. **NEVER written by control loop** — circuit changes affect all appliances. Safety automations use `zaptec.stop_charging` with `charger_id: d0775df2-6290-4569-bcd0-b579f8b9dde3`.
 
-| Entity | Description |
-|--------|-------------|
-| `switch.laddbox_charging` | Session ON/OFF — **use this for start/stop** |
-| `number.laddbox_charger_max_current` | Per-session current limit (A); throttle here for tariff hours |
-| `number.laddbox_charger_min_current` | Per-session minimum current (A) |
-| `sensor.laddbox_charger_mode` | Charger state string (see states table below) |
-| `sensor.laddbox_charge_power` | Active session power (W) |
-| `sensor.laddbox_session_total_charge` | Energy delivered this session (kWh) |
-| `sensor.laddbox_allocated_charge_current` | Currently allocated current (A) |
-| `button.laddbox_resume_charging` | **Deprecated in control loop** — was unreliable; use switch instead |
-| `button.laddbox_stop_charging` | **Deprecated in control loop** — was unreliable; use switch instead |
+Reset circuit if stuck: `curl -X POST https://koffern.duckdns.org:8123/api/services/zaptec/limit_current -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" -d '{"installation_id":"dcead66e-4c50-4763-bc17-6ef3efe8be1f","available_current":25}'`
 
-### Device 2: Zaptec Installation "Magnus Niemi" (circuit level)
+### `sensor.laddbox_charger_mode` States
 
-| Entity | Description |
-|--------|-------------|
-| `number.magnus_niemi_available_current` | Circuit available current (A) — set via `zaptec.limit_current` |
-| `sensor.magnus_niemi_available_current_phase_1/2/3` | Per-phase read-back sensors |
-| `sensor.magnus_niemi_max_current` | Circuit maximum (25A) |
-| `sensor.magnus_niemi_network_type` | `tn_3_phase` |
+| State | Connected? |
+|-------|-----------|
+| `disconnected` / `Disconnected` | No |
+| `unknown` / `unavailable` | No (wait 3s) |
+| `connected_requesting` / `Waiting` | Yes |
+| `connected_charging` / `Charging` | Yes — active charging |
+| `connected_finished` / `connected_finishing` / `paused` | Yes |
 
-Installation ID: `dcead66e-4c50-4763-bc17-6ef3efe8be1f` (Zaptec API UUID, used only by `zaptec.limit_current` if called from automations/Developer Tools — **not called from ev_control_loop.py**).
+`CHARGING_STATES`: `{connected_charging, Charging}` · `CONNECTED_STATES = CHARGEABLE_STATES ∪ CHARGING_STATES`
 
-**RULE: The control loop NEVER writes to magnus_niemi entities.** Circuit-level changes affect all appliances on the circuit. Tariff throttling is done session-level via `number.laddbox_charger_max_current` only.
+## Nordpool Price Data
 
-To reset the installation from the command line (if stuck): `curl -X POST [HA_URL]/api/services/zaptec/limit_current -H "Authorization: Bearer [TOKEN]" -H "Content-Type: application/json" -d '{"installation_id":"dcead66e-4c50-4763-bc17-6ef3efe8be1f","available_current":25}'`
+`state.getattr("sensor.nordpool_kwh_se3_sek_3_10_025")` returns:
+- `today`/`tomorrow`: 96-entry float arrays (index 0 = 00:00 local, 15-min steps)
+- `raw_today`/`raw_tomorrow`: 96 dicts `{"start": datetime, "end": datetime, "value": float}` — use these for slot filtering (explicit timestamps, DST-safe)
+- `tomorrow_valid`: bool — gates use of raw_tomorrow. Tomorrow data available ~13:00 local.
+- `current_price`: float
 
-### `sensor.laddbox_charger_mode` state enum
+**In pyscript**: `slot["start"]`/`slot["end"]` are **already datetime objects** — do not call `datetime.fromisoformat()` on them. Use: `(datetime.fromisoformat(s) if isinstance(s, str) else s).astimezone(timezone.utc)`. Prices in SEK/kWh raw (no tax); negative prices possible.
 
-| State | Meaning | CONNECTED? |
-|-------|---------|------------|
-| `disconnected` | No car present | No |
-| `Disconnected` | Firmware alternate label | No |
-| `unknown` / `unavailable` | Transitioning | No (wait 3 s) |
-| `connected_requesting` | Car connected, awaiting start | Yes |
-| `Waiting` | Firmware alternate label for requesting | Yes |
-| `connected_charging` | Session active, delivering energy | Yes (charging) |
-| `Charging` | Firmware alternate label | Yes (charging) |
-| `connected_finished` | Session ended (BMS, stop cmd, or optimizer) | Yes |
-| `connected_finishing` | Session winding down | Yes |
-| `paused` | Session paused | Yes |
+## Architecture
 
-Active charging states (`CHARGING_STATES`): `connected_charging`, `Charging`
-Chargeable states (`CHARGEABLE_STATES`): all "Yes" rows that are not charging
-`CONNECTED_STATES = CHARGEABLE_STATES | CHARGING_STATES`
+### Schedule Layer (`ev_optimizer.py`)
 
-## Architecture Summary
+- Service: `pyscript.ev_optimizer_recompute` — triggered on Nordpool update, deadline change, energy target, tariff toggle, weekly schedule change, hourly failsafe
+- `get_effective_deadline()`: collects all valid future deadlines (manual + computed), returns **nearest** — `ev_deadline` does NOT suppress weekly auto schedule; nearest wins
+- `ev_deadline` is **NEVER written by pyscript**. `ev_computed_deadline` is **NEVER set by user**. Clear manual deadline: set to `2000-01-01 00:00:00` (sentinel).
+- Eligible slot window: `now - 900s → deadline` (−900s lookback keeps currently-active slot eligible)
+- Effective power per slot: overnight (outside 06:00–22:00) = `charger_kw × 0.25` kWh; tariff-hour = `max_tariff_power_kw × 0.25` kWh (full when 0 = disabled)
+- **Per-hour cap**: `get_tariff_cap_slots_per_hour()` → `max_slots = int((cap_kwh − house_kw) / (charger_kw × 0.25))` clamped [0–4]; tariff-hour slots grouped by calendar hour, cheapest `max_slots` kept; overnight unconstrained; Tibber unavailable = fail-open
+- Post-selection: anti-toggling pass (merge isolated slots within 20% avg price) + surplus trim
+- Opportunistic mode (no valid deadline): `compute_opportunistic_schedule()` — all slots ≤ median price in next 24h; `mode="opportunistic"`, `required_slots=0`
 
-The optimizer has three cooperating layers. The **schedule layer** (`ev_optimizer.py`) runs as a pyscript service (`pyscript.ev_optimizer_recompute`) and is triggered on every Nordpool price update, deadline change, energy target change, tariff guard toggle/change, weekly schedule change, and once per hour as a failsafe. When `input_boolean.ev_auto_deadline` is on, the schedule layer reads `input_text.ev_weekly_schedule` JSON every 5 minutes via `_auto_deadline_tick` and writes the next upcoming departure to `input_datetime.ev_computed_deadline` (≥ 15 minutes away). Days with empty time lists write the 2099 sentinel, triggering opportunistic mode. `get_effective_deadline()` collects ALL valid future deadlines (manual + auto computed) and returns the **nearest** one — whichever departure is soonest wins, regardless of source. This means a manual `ev_deadline` set for a distant trip does NOT suppress the auto weekly schedule; the optimizer charges for the weekly departures first and automatically switches to the manual deadline once the weekly departures have passed. Multiple trips can be planned simultaneously — the system chains from one deadline to the next as each passes. **`input_datetime.ev_deadline` is NEVER written by pyscript** — it belongs to the user as a manual override. When `ev_auto_deadline` is off, `ev_computed_deadline` is not updated and the optimizer relies on `ev_deadline` if set. It reads the 15-minute Nordpool slot prices for today (and tomorrow if valid), filters to slots within the eligible window (now → deadline, or 48-hour horizon in opportunistic mode), and selects the cheapest N slots needed to deliver the required kWh. Effective charging power is **time-aware**: overnight slots (outside 06:00–22:00 local) deliver `sensor.ev_charging_power_kw × 0.25` kWh each (typically 1.75 kWh at 7 kW); daytime tariff-hour slots deliver `input_number.ev_max_tariff_power_kw × 0.25` kWh each (typically 0.75 kWh at 3 kW) when `input_boolean.ev_tariff_guard_enabled` is on. N is computed by walking the cheapest-first eligible slots, accumulating effective kWh until the target is met — overnight slots cover the target in fewer slots and are therefore preferred both on price and energy-per-slot. `expected_cost` and `total_kwh` in the schedule attributes are calculated per slot at the correct effective power. **Per-hour cap enforcement**: before the cheapest-N selection, `get_tariff_cap_slots_per_hour()` reads `input_number.ev_max_hourly_kwh` and `sensor.tibber_pulse_dianavagen_15_average_power` to compute `ev_headroom_kwh = cap_kwh - house_kw` and `max_slots = int(ev_headroom_kwh / (charger_kw × 0.25))` (clamped to [0,4]). Tariff-hour slots (06:00–22:00) are grouped by calendar hour and only the cheapest `max_slots` per hour are kept; overnight slots are unconstrained. Tibber unavailable → fail-open (no cap filter applied). This prevents the optimizer from scheduling more energy in a single hour than the Ellevio tariff allows, avoiding over-schedule even before the consumption guard runs. The optimizer applies an anti-toggling pass to merge isolated single slots with cheap neighbours (within 20% of average price), and writes the resulting windows as a JSON list to `sensor.ev_schedule`.
+### Control Layer (`ev_control_loop.py`) — Priority Chain
 
-The **control layer** (`ev_control_loop.py`) runs every 5 minutes, on pyscript startup, and immediately whenever `sensor.laddbox_charger_mode` transitions to `"charging"`. Additionally, `on_input_changed()` in `ev_optimizer.py` fires `ev_control_loop()` directly ~3 seconds after any input change (deadline, target, mode, schedule) — new windows or deadline pressure take effect within seconds rather than waiting for the next 5-minute tick. `on_price_update()` also calls `ev_control_loop()` ~2 seconds after each Nordpool price change, so when a price spike invalidates the current charging window the charger stops immediately rather than running for up to 5 minutes until the next tick (fix applied 2026-04-29). The reactive charge-start trigger (`ev_control_on_charge_start`) closes the gap between car connection (when Zaptec may auto-start) and the next scheduled tick, stopping unauthorised charging within seconds. All three entry points share the same decision tree: manual override modes (Charge now / Stop) take absolute priority; then it reads deadline pressure (`binary_sensor.ev_deadline_pressure`) and sets a `forced_on` flag; step 4 handles the no-schedule case; step 5 evaluates the schedule via `should_charge_now()`; step 6 routes outside-window+no-pressure directly to OFF (bypassing the consumption guard — the guard must never run when the optimizer has decided not to charge, as it would produce misleading "optimal start" times); step 7 runs the consumption guard only when the optimizer wants to charge (desired=True or forced_on=True); step 8 forces ON immediately for deadline pressure **without hysteresis** — it is a hard override; step 9 follows the in-window schedule with 15-minute hysteresis. The consumption guard blocks charging if the projected hourly kWh would exceed `input_number.ev_max_hourly_kwh`. The guard only applies during Ellevio tariff hours (06:00–22:00 local time) and can be disabled via `input_boolean.ev_tariff_guard_enabled`. All state changes write a human-readable reason to `input_text.ev_decision_reason`.
+`ev_control_loop()` has `@service` — cross-file calls use `pyscript.ev_control_loop()` (async/fire-and-forget). Within same file: direct call.
 
-The **safety layer** (automations in `packages/ev_optimizer.yaml`) runs independently of pyscript as a hard-stop backstop. Three automations cover: energy target reached (ev_remaining_kwh < 0.2 kWh), departure deadline passed (resets deadline to 2000-01-01 to prevent re-trigger), and Nordpool data unavailable. The Mercedes Me BMS manages battery charge termination natively — HA does not interfere with SoC. The SoC safety stop was deliberately removed on 2026-04-26. These automations do not conflict with the existing HA automations because they use different triggers and conditions.
+Triggers: 5-min tick · startup · `laddbox_charger_mode → "charging"` · +3s after any input change · +2s after Nordpool price update
+
+| Step | Condition | Action |
+|------|-----------|--------|
+| 0 | Mode not in CONNECTED_STATES | Write reason, return |
+| 1 | Mode = Stop | Force OFF |
+| 2 | Mode = Charge now | Force ON |
+| 3 | `ev_deadline_pressure` on | Set `forced_on=True`, continue |
+| 4 | No schedule | OFF, return |
+| 5 | Evaluate schedule | `desired = should_charge_now()` |
+| 6 | `not desired and not forced_on` | OFF, **skip guard entirely**, return |
+| 7 | Consumption guard check | Hold if over hourly cap (only reached when desired or forced_on) |
+| 8 | `forced_on` (deadline pressure) | ON **without hysteresis** |
+| 9 | `desired` (in scheduled window) | ON with 15-min hysteresis |
+
+### Safety Layer (`packages/ev_optimizer.yaml`)
+
+Automation IDs `1745760001`–`1745760004`:
+1. `ev_remaining_kwh < 0.2 kWh` (condition: `connected_charging`) → stop charger
+2. Manual deadline passed → stop + reset `ev_deadline` to `2000-01-01`
+3. Auto deadline passed → stop charger
+4. Nordpool sensor → `unavailable` → stop charger
+
+All write `ev_decision_reason`. **NEVER set `ev_charging_mode` to Stop in automations** — requires manual recovery. **Do NOT remove `automation.electrical_extreme_high_consumption`** — independent safety net. Mercedes BMS handles SoC termination natively — no SoC stop in HA.
 
 ## Known Quirks
 
-31. **Automation `id:` must be a numeric quoted string for HA UI editability (2026-04-27)**: HA only exposes automations as editable in **Settings → Automations** when the `id:` field is a numeric string (e.g. `"1745760001"`). String IDs like `ev_safety_target_reached` load and function correctly but do not appear in the UI editor. All four safety automations were changed to epoch-based numeric IDs. **`_2` suffix problem**: when IDs change, HA's entity registry still holds the old string-ID entries; new numeric-ID automations then get `_2` appended to their entity_id because the alias-derived object_id is already claimed. Fix requires stopping HA and editing `.storage/core.entity_registry` and `.storage/core.restore_state` while the container is down: (1) remove old string-ID entries, (2) rename `_2` entries to drop the suffix, (3) restart. Ghost automation entities (`automation.ev_safety_soc_target_reached`, `automation.ev_safety_deadline_passed`) persist in the registry until explicitly removed — they do NOT disappear on their own after a restart.
+1. **Pyscript: no generator expressions** — always use list comprehensions: `sum([x for x in items])` not `sum(x for x in items)`.
+2. **Pyscript: lambda closures need default-arg capture** — `lambda i, d=by_idx: d[i]["price"]` not `lambda i: by_idx[i]["price"]`.
+3. **`state.getattr()` single-arg only** — `state.getattr(entity)` → dict → `.get("key")`. Two-arg form raises TypeError.
+4. **`is_state()` not in pyscript** — use `(state.get(entity) or "off") == "on"` everywhere in ev_optimizer.py and ev_control_loop.py.
+5. **`input_datetime` timezone** — always use `timestamp` attribute (UTC epoch float). In pyscript: `(state.getattr(ENT) or {}).get("timestamp")`; in Jinja2: `state_attr('...', 'timestamp')`. Never parse the state string directly (naive string with DST offset causes 2h error).
+6. **`input_datetime` state trigger** — always `task.sleep(1)` before reading state after trigger/toggle (state may hold old value in same event cycle).
+7. **`sensor.ev_schedule` state format** — compact epoch JSON `[{"s": start_ts, "e": end_ts}, ...]` (~30 chars/window, fits 255-char HA limit). Full ISO data in `attributes.schedule`. Parse in control loop: `float(window["s"])` / `float(window["e"])`.
+8. **`sensor.ev_schedule` lost on restart** — pyscript in-memory state. `_ev_recompute_on_startup` (`@time_trigger("startup")`) restores it.
+9. **Config files are root-owned** — all debian writes require `sudo`. Use SCP + sudo cp workflow. No direct `sudo nano` from subagent (no TTY).
+10. **`switch.laddbox_charging` for start/stop** — `switch.turn_on/off(entity_id="switch.laddbox_charging")`. NOT button entities or `zaptec.resume_charging`/`zaptec.stop_charging` services (control loop only — safety automations do use `zaptec.stop_charging`).
+11. **`ev_max_tariff_power_kw = 0` disables throttling** — Mercedes PHEV min is 10A (6.93 kW on 3-phase 400V). Adjusting current mid-session terminates the session. Values < 10A equivalent treated as disabled. To re-enable throttling for another car: set `ev_max_tariff_power_kw ≥ 7.0 kW`.
+12. **Consumption guard latest-start algorithm** — `headroom = cap − accumulated_kwh`; `max_charge_min = headroom / (house_kw + ev_kw) × 60`; `latest_start = 60 − max_charge_min`. If `now ≥ latest_start` → allow. Else: if next-hour price < current×0.95 → skip to next hour; else → hold until latest_start. Fail-open if Tibber unavailable. `ev_consumption_guard_active` boolean is dormant (never written by guard). **Disable `ev_tariff_guard_enabled` on 2026-06-01** (Ellevio scraps power tariff scheme).
+13. **Hysteresis timestamp** — `ev_last_state_change` is `"YYYY-MM-DD HH:MM:SS"` local Stockholm time. Parse: `strptime(..., "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_LOCAL)`.
+14. **`input_text` max 255 chars** — `ev_weekly_schedule` uses all 255. Use compact JSON (no spaces). 2 times/day × 7 days ≈ 160 chars; 3 times/day ≈ 220 chars. Do NOT add `initial:` — overrides persisted data on restart.
+15. **Weekly schedule persistence** — persisted to `/config/pyscript/ev_schedule_data.json` via `task.executor(Path(...).write_text, data)`. Restored by `restore_weekly_schedule` startup trigger.
+16. **Deadline semantics** — `ev_deadline` and `ev_computed_deadline` are equal candidates; nearest future one wins. Manual deadline does NOT suppress weekly schedule. Clear manual deadline: set to `2000-01-01 00:00:00`. Safety automation bound `> 946684800` (2000-01-01 UTC epoch) prevents re-trigger on sentinel value.
+17. **Weekly schedule look-ahead** — `get_next_departure()` skips departures < 15 min away. Rollover within 5 min via `_auto_deadline_tick`.
+18. **Schedule grid iframe** (`/local/ev_schedule_grid.html`) — `type: iframe` Lovelace card. HTML changes need browser hard-refresh only (no pyscript reload). Shows all future deadlines: 📅 Manual / 🗓 Auto / 🔮 Opportunistic. "Clear manual override" button sets `ev_deadline` to `2000-01-01`. `attributes.schedule` ISO strings: `(w.start | as_datetime).timestamp()` for epoch; `[11:16]` = `HH:MM`. Card in `.storage/lovelace.lovelace` sections[0].cards index 4.
+19. **`compute_schedule()` epoch timestamps throughout** — all comparisons via `.timestamp()` (POSIX UTC epoch). Surplus-trim pass removes most-expensive slots until `total_kwh ≥ req_kwh − min_slot_kwh`, preventing over-scheduling from anti-toggling.
+20. **`get_next_departure()` explicit date construction** — `datetime(year=..., month=..., day=..., hour=h, minute=m, tzinfo=local_tz)`. Never `strptime()` without full date.
+21. **Opportunistic mode** — `compute_opportunistic_schedule()` when no valid deadline. Selects all slots ≤ median price in next 24h. `mode="opportunistic"`, `required_slots=0`.
+22. **SoC stop deliberately removed** — Mercedes BMS handles charge termination natively. Do NOT re-add SoC threshold stop in HA.
+23. **Slot filter −900s lookback** — eligible slots use `start_ts >= now_ts − 900`. Keeps currently-active slot after recompute. Upper bound still excludes elapsed slots.
+24. **Charger current reset on stop/startup** — `set_charger(False)` calls `reset_to_full_current()` → `number.laddbox_charger_max_current = 25`. `reset_charger_on_startup()` (`@time_trigger("startup")`, sleep 15s) also resets. Magnus Niemi circuit level never touched.
+25. **`ev_safety_target_reached` condition** — must use `state: "connected_charging"` (Zaptec v0.8.x) not `"charging"`.
+26. **`should_charge_now()` window-active condition** — `w_start <= now_ts + 60 and w_end > now_ts`. Use `window.get("s", window.get("start_ts", 0))`. Do NOT use `w_start >= now_ts − 900` here (causes all future windows to activate immediately).
+27. **Automation `id:` must be numeric string** — e.g. `"1745760001"`. String IDs work but don't appear in Settings → Automations UI. If IDs change and `_2` suffix appears: stop HA, edit `.storage/core.entity_registry` + `.storage/core.restore_state` to remove old entries and drop `_2` suffixes, restart.
+28. **Connection guard** — `ev_control_loop()` returns immediately if `sensor.laddbox_charger_mode` not in `CONNECTED_STATES`. Also applied in `on_zaptec_state_changed()`.
+29. **`_is_charging()` checks `connected_charging`** — not `"charging"`. Gates the `on != current` transition check in `set_charger()`.
+30. **`_apply_tariff_current()` on fresh start only** — changing current mid-session terminates the Mercedes session. Called only in `on != current` branch with `task.sleep(2)` guard. Never in `on == current` branch.
+31. **`binary_sensor.ev_deadline_pressure` reads template sensors** — reads `sensor.ev_slots_needed` and `sensor.ev_slots_available`. Guards: `slots_needed > 0` AND deadline `> now + 300s`.
+32. **`schedule_watchdog()` suppression guards** — skip recompute when: deadline < 30 min away or passed; OR `ev_remaining_kwh ≤ 0.2 kWh`. Only fire WARNING + recompute: schedule empty AND deadline > 30 min AND remaining > 0.2 kWh.
+33. **Deadline pressure bypasses hysteresis** — step 8 calls `set_charger(True)` directly. Do NOT add `check_hysteresis()` to the deadline-pressure path.
+34. **`on_input_changed()` fires control loop** — after recompute + 1s settle, calls `pyscript.ev_control_loop()`. Changes take effect within ~3s.
+35. **Safety automations must not set mode to Stop** — requires manual recovery. Automations must only: stop Zaptec, write `ev_decision_reason`, optionally reset `ev_deadline` to `2000-01-01`.
+36. **`on_price_update()` must call `pyscript.ev_control_loop()` after recompute** — prevents up to 5 min of unnecessary charging when price spikes. Do NOT remove `automation.electrical_extreme_high_consumption`.
+37. **Pyscript cross-file calls** — only `@service`/trigger-decorated functions are in shared namespace. Call with `pyscript.func_name()` (async/fire-and-forget). Do NOT call `pyscript.func_name()` within the same file — use direct function call instead (cross-file calls are async; in-file calls are synchronous).
+38. **Consumption guard placement** — guard runs at step 7 only when `desired=True` or `forced_on=True`. Step 6 routes outside-window + no-pressure directly to OFF. Guard never runs when optimizer has decided not to charge.
+39. **`ev_slots_needed` cap-aware during tariff hours** — with guard on and cap > 0: `slots_per_hour = int(ev_headroom / (charger_kw × 0.25))` (min 1); `hours_needed = ceil(remaining / ev_headroom)`; result = `hours_needed × slots_per_hour`. Returns 999 when headroom ≤ 0. Outside tariff hours: `ceil(remaining / charger_kw / 0.25)`.
+40. **Nordpool `raw_*` slot fields are datetime objects in pyscript** — `slot["start"]`/`slot["end"]` are already parsed. Do NOT call `datetime.fromisoformat()` directly. Use: `(datetime.fromisoformat(s) if isinstance(s, str) else s).astimezone(timezone.utc)` for both start and end.
+41. **"No schedule available" / pyscript not loading** — normal on first start or when `ev_required_kwh=0` and SoC=100%. If pyscript services missing from `/api/services`: check `pyscript:` block in configuration.yaml; verify `GET /api/config` shows `pyscript` in components list.
 
-32. **Safety automation condition uses `connected_charging` (2026-04-27)**: The `ev_safety_target_reached` automation had `state: "charging"` in its condition, which never matched because Zaptec v0.8.x reports the active state as `"connected_charging"`. The condition was corrected to `state: "connected_charging"`. Without this fix the safety stop for energy-target-reached would silently never fire.
+## Quick Reference — Common Commands
 
-33. **`should_charge_now()` uses `.get()` with fallbacks for window keys (2026-04-27)**: The original code used `window["s"]` (hard key access). If `"s"` is missing (stale schedule from before compact-format migration), a `KeyError` is raised, caught by the `except` block, and the window is silently skipped — causing `should_charge_now()` to return `False` for a window that is active. Fixed to `window.get("s", window.get("start_ts", 0))` so a missing key is always tolerated. Window-active condition: `w_start <= now_ts + 60 and w_end > now_ts`. The +60 s forward tolerance covers the edge case where the tick fires 1-2 s before a window boundary. **Do NOT use `w_start >= now_ts - 900`** — a future timestamp always satisfies that condition, causing every upcoming window to appear "active" immediately after recompute (charging starts hours early). The -900s lookback is correct for the slot eligibility filter in `compute_schedule()` but is incorrect here.
-
-34. **`button.laddbox_resume_charging` stays `unavailable` briefly after plug-in (2026-04-27)**: When the car is first plugged in, Zaptec transitions `disconnected → connected_requesting`, which makes `CONNECTED_STATES` check pass and lets the control loop proceed. But the button entity may still be `unavailable` for 1–5 s after the charger mode settles, producing the HA warning `"Referenced entities button.laddbox_resume_charging are missing or not currently available"` and silently failing to start charging. Fix: `set_charger(True, ...)` now checks `state.get(RESUME_BTN_ENT) == "unavailable"` before pressing; if unavailable, it waits 5 s and re-checks once. If still unavailable it writes `[btn unavailable]` to `ev_decision_reason` and returns — the next 5-minute tick will retry.
-
-1. **Pyscript AST restrictions**: Generator expressions are not supported. Always use list comprehensions: `sum([x for x in items])` not `sum(x for x in items)`. Affects avg_px, sorted_px, total_kwh, total_cost calculations.
-
-2. **Pyscript lambda closure bug**: Lambdas cannot close over local variables from an enclosing scope — raises `NameError` at runtime. Always capture enclosing variables via a default argument: `lambda i, d=by_idx: d[i]["price"]` instead of `lambda i: by_idx[i]["price"]`. Note: lambdas using only their own parameters (e.g. `lambda s: s["price"]`) are fine.
-
-3. **state.getattr() single-argument only**: `state.getattr(entity, "attr")` raises TypeError. Always call `state.getattr(entity)` to get the full attributes dict, then use `.get("key")`.
-
-4. **ev_schedule state is the JSON string**: `state.get("sensor.ev_schedule")` returns the JSON directly. In the control loop, parse it with `json.loads(sched_state)`. Do not try to read it from attributes. The state contains compact epoch windows `[{"s": start_epoch, "e": end_epoch}, ...]` (~30 chars each) to stay within HA's 255-char state limit. Full window data (ISO times, price, slots, kwh, cost) is in `attributes.schedule` for Lovelace display. The `cost` field is per-window accurate cost (sum of `price × effective_power_kw × 0.25` per slot) — not flat `price × kwh`.
-
-5. **input_datetime defaults**: `ev_deadline` defaults to midnight today (past timestamp), so `ev_deadline_pressure` will be `True` and `ev_slots_available` will be 0 until a real future deadline is set. This is expected and harmless — the control loop falls through to the schedule check.
-
-6. **ev_decision_reason shows "No schedule available"**: This is normal on first start before `pyscript.ev_optimizer_recompute` has run or before Nordpool data is available. It also appears when ev_required_kwh=0 and SoC=100% (nothing to charge).
-
-7. **Pyscript sensor state lost on restart**: `state.set()` values (like `sensor.ev_schedule`) are held in pyscript's in-memory state and are not persisted across HA restarts. After a restart, `sensor.ev_schedule` returns to `unknown` until a trigger fires. A `@time_trigger("startup")` function `_ev_recompute_on_startup` was added to `ev_optimizer.py` to recompute immediately on startup and restore the sensor.
-
-8. **Pyscript not loading**: If pyscript services are absent from `/api/services`, the `pyscript:` block is missing from configuration.yaml, or HA needs a full restart (not just reload). Verify with `GET /api/config` → check `components` list contains `pyscript`.
-
-9. **configuration.yaml is root-owned**: All edits on debian require `sudo`. Use the SCP + sudo cp workflow. Avoid editing directly with `sudo nano` over SSH from a subagent (no TTY).
-
-10. **Zaptec start/stop use `switch.laddbox_charging`, NOT button entities (2026-04-27)**: `ev_control_loop.py` uses `switch.turn_on/off(entity_id="switch.laddbox_charging")` for session control. Earlier iterations used the deprecated `zaptec.resume_charging` / `zaptec.stop_charging` services (raised `ValueError`), then tried `button.laddbox_resume_charging` / `button.laddbox_stop_charging` (remained `unavailable` 1-5 s after plug-in). The switch entity is the correct approach. Current throttling for tariff hours uses `number.laddbox_charger_max_current` (session-level) — never the installation-level `zaptec.limit_current`. The safety automations in `ev_optimizer.yaml` still use `zaptec.stop_charging` directly and continue to work.
-
-29. **Connection guard skips all Zaptec calls when no car connected (2026-04-27)**: `ev_control_loop()` checks `sensor.laddbox_charger_mode` against `CONNECTED_STATES = {connected_requesting, connected_charging, connected_finished}` before any other logic. If the state is `disconnected` or `unknown`, the function writes `"No car connected ({state})"` to `ev_decision_reason` and returns immediately — no Zaptec button or service is called. `on_zaptec_state_changed()` applies the same check: if the new state is not in `CONNECTED_STATES`, it updates the reason and returns without running the control loop. This prevents `button.press` calls against `unavailable` entities and eliminates spurious log noise on every 5-minute tick when the car is unplugged.
-
-30. **`_is_charging()` checks `connected_charging` not `charging` (2026-04-27)**: The Zaptec integration v0.8.x reports the active charging state as `"connected_charging"`, not plain `"charging"`. The old check `str(mode).lower() == "charging"` always returned False, causing `set_charger()` to see `on != current` on every tick even when the charger was already running — triggering spurious `resume_charging` calls that failed with `ValueError`. Fixed to `== "connected_charging"`. The `_is_charging()` return value gates the `on != current` transition check in `set_charger()`, so this fix also eliminates all redundant start/stop service calls during steady-state operation.
-
-11. **`ev_max_tariff_power_kw = 0` disables current throttling (2026-04-27)**: Setting `input_number.ev_max_tariff_power_kw` to 0 disables per-session current throttling entirely. This is the default for this installation because the Mercedes PHEV minimum is 10 A (6.93 kW on 3-phase 400V), which makes sub-7 kW throttling impossible. Protection during tariff hours comes from: (1) the optimizer scheduling only the cheapest price slots, and (2) the Tibber consumption guard stopping charging when the projected hourly kWh would exceed `ev_max_hourly_kwh`. Both `_apply_tariff_current()` (control loop) and `effective_power_kw()` (optimizer) treat 0 kW as "throttling disabled" and use full charging power. Values between 0 and 6.93 kW are also treated as disabled (below car minimum 10 A). If current throttling is ever re-enabled for another car, set `ev_max_tariff_power_kw ≥ 7.0` kW. The infrastructure (`number.laddbox_charger_max_current`) remains in place for portability.
-
-12. **Price-aware consumption guard with latest-start algorithm (2026-04-27)**: `check_consumption_guard()` in `ev_control_loop.py` replaces the old projection-based guard. Algorithm: (1) `headroom = cap - accumulated_kwh`; if ≤ 0, hold until next hour. (2) `max_charge_minutes = headroom / (house_kw + ev_kw) × 60` — how long the EV can run before hitting the cap. (3) `latest_start_minute = 60 - max_charge_minutes` — start this late and finish exactly at the hour. (4) If `now ≥ latest_start`, allow charging (optimal window). (5) If `now < latest_start`, compare current vs next-hour Nordpool price via `get_slot_price()`: next ≥ current×0.95 → hold until latest_start (charge cheaper this hour); next < current×0.95 → skip to next hour. Both Tibber sensors must be available — fail-open if not. Guard runs at priority step 7, only when optimizer wants to charge (desired=True or forced_on=True) — if guard holds + deadline pressure active, writes combined reason. Guard is intentionally skipped when desired=False (outside window, no pressure) — see quirk 47. `input_boolean.ev_consumption_guard_active` remains in YAML but is no longer set/cleared by this function (it exists as a dormant Lovelace indicator). **Disable `input_boolean.ev_tariff_guard_enabled` on 2026-06-01** when Ellevio scraps the power tariff scheme.
-
-13. **Hysteresis timestamp format**: `ev_last_state_change` state is "YYYY-MM-DD HH:MM:SS" in local Stockholm time (no UTC offset). Parse with `strptime(..., "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_LOCAL)`.
-
-15. **`input_text` YAML max is 255**: HA's YAML-defined `input_text` helpers enforce `max ≤ 255`. The `ev_weekly_schedule` entity uses `max: 255`. The default schedule is ~100 chars; 2 departure times per day across all days is ~160 chars; 3 per day is ~220 chars. Compact JSON (no extra spaces) is required for complex schedules.
-
-16. **Two deadline entities: human input vs pyscript computed**: `input_datetime.ev_deadline` is the human-only manual override — pyscript never writes it. `input_datetime.ev_computed_deadline` is written only by `auto_set_deadline()` and never shown as editable in the UI. `get_effective_deadline()` collects both entities and returns the nearest valid future deadline (nearest-wins, not manual-priority). This means setting a manual deadline for a long trip does not suppress the weekly auto schedule — the auto deadlines are used first, and the manual deadline is used once they have passed. To plan a trip beyond the weekly schedule, set `ev_deadline` to that trip's departure time; the system will handle weekly departures automatically and then switch to the manual deadline. To clear the manual deadline and rely solely on the weekly schedule, set `ev_deadline` to a past date (e.g. 2000-01-01). The optimizer will then use `ev_computed_deadline` from the weekly schedule automatically.
-
-17. **Weekly schedule 15-minute minimum look-ahead**: `get_next_departure()` skips any departure time that is fewer than 15 minutes in the future (`< now + 15 min`). This prevents scheduling for an imminent departure that leaves no time to charge. Rollover after a departure passes happens within 5 minutes via the `_auto_deadline_tick`.
-
-14. **`is_state()` not available in pyscript**: `is_state(entity_id, state)` is a Jinja2 template helper and does NOT exist in pyscript. Use `(state.get(entity_id) or "default") == "value"` instead. Example: `(state.get("input_boolean.ev_tariff_guard_enabled") or "off") == "on"`. This applies everywhere in ev_optimizer.py and ev_control_loop.py.
-
-19. **`input_datetime` timezone bug — always use the `timestamp` attribute**: Pyscript's `state.get("input_datetime.ev_deadline")` may return a UTC string in some HA versions even though the entity logically holds local time. Parsing that string with `.replace(tzinfo=TZ_LOCAL)` then yields a timestamp 2 hours early (CEST = UTC+2). Similarly, Jinja2's `as_timestamp(states('input_datetime.ev_deadline'))` can misinterpret the naive string. **Always use the pre-computed UTC epoch instead**: in pyscript: `(state.getattr(DEADLINE_ENT) or {}).get("timestamp")`; in Jinja2 templates: `state_attr('input_datetime.ev_deadline', 'timestamp')`. Both return a float UTC epoch that is correct regardless of DST.
-
-20. **Weekly schedule persistence via file**: `input_text.ev_weekly_schedule` has no `initial:` value — HA would reset to `initial:` on every restart if one were set. Instead, ev_optimizer.py persists the schedule to `/config/pyscript/ev_schedule_data.json` on every change (`persist_weekly_schedule` state trigger) and restores it from that file on startup (`restore_weekly_schedule` startup trigger). File I/O uses `task.executor(Path(...).read_text)` / `task.executor(Path(...).write_text, data)` — the raw `open()` built-in and `pathlib.Path.read_text()` are not directly callable in pyscript (blocked as blocking I/O on the event loop). **Do not add an `initial:` value** to the YAML definition — it would override the persisted data on every restart.
-
-21. **`input_datetime` state trigger requires `task.sleep(1)`**: When pyscript triggers on `input_datetime.ev_deadline`, `state.getattr(DEADLINE_ENT)` may still return the old value within the same event cycle. The dedicated `on_deadline_changed` function calls `task.sleep(1)` before invoking `ev_optimizer_recompute()` to allow HA state to fully settle. The same applies to `_on_auto_deadline_toggle` — always `task.sleep(1)` before reading state after a toggle.
-
-22. **`sensor.ev_schedule` state uses compact epoch format**: The state string stores windows as `[{"s": start_epoch, "e": end_epoch}, ...]` using compact JSON separators (`separators=(',', ':')`) — approximately 30 chars per window. This replaced the ISO timestamp format (`{"start": "...", "end": "..."}` at ~75 chars/window) which overflowed the 255-char HA state limit at 4+ windows. Full ISO times are still available in `attributes.schedule` for Lovelace display. The control loop (`ev_control_loop.py`) parses windows using `float(window["s"])` and `float(window["e"])` as UTC epoch timestamps.
-
-23. **`compute_schedule()` uses epoch timestamps throughout for slot filtering and trim**: Slot eligibility filtering and the surplus-trim pass both use `.timestamp()` comparisons (`slot["start"].timestamp() >= now_ts`, `slot["end"].timestamp() <= deadline_ts`) rather than datetime object comparisons. This avoids a potential CEST (UTC+2) 2-hour offset error that could include slots beyond the deadline when datetime-aware objects from different construction paths are compared. `now_ts = datetime.now(tz=ZoneInfo(hass.config.time_zone)).timestamp()` — `.timestamp()` always returns a POSIX UTC epoch regardless of the timezone argument, so this is correct and consistent with `get_effective_deadline()`. The trim pass after anti-toggling removes the most expensive surplus slots (those whose removal keeps total kWh ≥ req_kwh) until the schedule is within one minimum-power slot of the target, preventing over-scheduling caused by the clustering heuristic.
-
-24. **`get_next_departure()` always uses explicit date components**: Departure datetimes are constructed as `datetime(year=target_date.year, month=target_date.month, day=target_date.day, hour=h, minute=m, second=0, tzinfo=local_tz)` — never via `datetime.strptime()` without a full date (Python defaults missing date components to 1900 or 2000 depending on version). The 15-minute look-ahead check uses epoch comparison (`candidate.timestamp() > now_ts + 900`) rather than a direct datetime comparison, consistent with the BUG A fix pattern throughout the codebase.
-
-25. **Opportunistic mode selects cheap slots without a completion guarantee**: When `get_effective_deadline()` returns `(None, "opportunistic")` the recompute path calls `compute_opportunistic_schedule()` instead of `compute_schedule()`. Opportunistic mode selects all slots at or below the median price in the next 24 hours — no slot-count limit and no guarantee that a specific kWh target is met. The schedule `mode` attribute will be `"opportunistic"` and `required_slots` will be 0. `compute_schedule()` is only called when a valid deadline exists. To verify opportunistic mode: disable `input_boolean.ev_auto_deadline`, set both deadline entities to the 2099 sentinel, trigger recompute, and check `sensor.ev_schedule` attributes for `"mode": "opportunistic"`.
-
-26. **SoC safety stop deliberately removed (2026-04-26)**: The `ev_safety_soc_reached` automation (which hard-stopped charging at 95% SoC) was removed. The Mercedes Me BMS manages its own battery charge termination natively and will stop at the correct level automatically. HA only stops charging based on kWh target, departure deadline, and price data availability. Do not re-add a SoC threshold stop.
-
-28. **Slot filter uses -900s lookback to include the currently-active slot (2026-04-27)**: `compute_schedule()` and `compute_opportunistic_schedule()` filter eligible slots with `start_ts >= now_ts - 900` (one full 15-minute slot duration) rather than `>= now_ts`. Without this, a recompute triggered 1 second after a Nordpool slot boundary (the `task.sleep(1)` in `on_price_update`) sets `now_ts = slot_start + 1` — the `>= now_ts` test then excludes the just-started slot, advancing the schedule window forward by 15 minutes on every price update. With the -900s lookback, the currently-active slot remains eligible for the entire 15 minutes it is running. Slots that have already fully elapsed are still excluded by the upper bound (`end_ts <= deadline_ts` / `end_ts <= horizon_ts`). The same lookback is applied in `compute_opportunistic_schedule()` using `s["start"].timestamp() >= now_ts - 900`.
-
-27. **Charger current reset to full on stop and startup (2026-04-27)**: `set_charger(False, ...)` always calls `reset_to_full_current()` (which sets `number.laddbox_charger_max_current = 25`) after a real ON→OFF transition. A separate `@time_trigger("startup")` function `reset_charger_on_startup()` (with `task.sleep(15)`) resets to 25A on every HA reload/restart. This ensures manual charging starts at full speed if HA was restarted while the charger was throttled. The ev_decision_reason shows `| current reset to 25A` appended when a real stop transition fires. The reset uses the charger-level entity only — the installation (magnus_niemi) is never touched by the control loop.
-
-18. **Schedule grid iframe card** (`/local/ev_schedule_grid.html`): The weekly departure grid is embedded as a `type: iframe` Lovelace card pointing to `/local/ev_schedule_grid.html`. In Docker HA, `/config/www/` maps to `/local/` for browser access. If the card shows blank, check: (a) the file exists at `/media/pi/NextCloud/homeassistant/www/ev_schedule_grid.html` on the host, (b) HA has served it at least once (try opening `https://[YOUR_HA_HOSTNAME]:8123/local/ev_schedule_grid.html` directly), (c) the `HA_TOKEN` constant in the file has been replaced with a valid long-lived access token. **HTML changes do not require pyscript reload — hard-refresh the browser (Ctrl+Shift+R).** The status section shows ALL valid future deadlines (not just the nearest): "Next departure" row shows the nearest, and an "Also" row appears below when both manual and auto deadlines are simultaneously valid future dates. Badges: 📅 Manual / 🗓 Auto / 🔮 Opportunistic. `loadStatus()` sorts candidates by `ts` ascending and picks `candidates[0]` as nearest and `candidates[1]` as secondary. "Clear manual departure override" button sets `ev_deadline` to 2000-01-01 (the sentinel for "no manual deadline") and refreshes status immediately.
-
-## How to Test
-
-**Verify template sensors are computed:**
 ```bash
-curl -s -H "Authorization: Bearer TOKEN" \
-  https://[YOUR_HA_HOSTNAME]:8123/api/states/sensor.ev_remaining_kwh | python3 -m json.tool
+# Restart HA
+ssh pi@debian "docker restart homeassistant"
+
+# Reload pyscript
+curl -s -X POST https://koffern.duckdns.org:8123/api/services/pyscript/reload \
+  -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# Trigger recompute
+curl -s -X POST https://koffern.duckdns.org:8123/api/services/pyscript/ev_optimizer_recompute \
+  -H "Authorization: Bearer TOKEN" -H "Content-Type: application/json" -d '{}'
+
+# Check decision reason / schedule / any sensor
+curl -s https://koffern.duckdns.org:8123/api/states/input_text.ev_decision_reason \
+  -H "Authorization: Bearer TOKEN"
+curl -s https://koffern.duckdns.org:8123/api/states/sensor.ev_schedule \
+  -H "Authorization: Bearer TOKEN" | python3 -m json.tool
+
+# Pyscript logs
+ssh pi@debian "docker logs homeassistant 2>&1 | grep -E 'ev_optimizer|ev_control' | tail -30"
 ```
-
-**Manually trigger schedule recompute:**
-```bash
-curl -s -X POST -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{}' \
-  https://[YOUR_HA_HOSTNAME]:8123/api/services/pyscript/ev_optimizer_recompute
-```
-
-**Check schedule output:**
-```bash
-curl -s -H "Authorization: Bearer TOKEN" \
-  https://[YOUR_HA_HOSTNAME]:8123/api/states/sensor.ev_schedule | python3 -m json.tool
-```
-
-**Check control loop decision:**
-```bash
-curl -s -H "Authorization: Bearer TOKEN" \
-  https://[YOUR_HA_HOSTNAME]:8123/api/states/input_text.ev_decision_reason
-```
-
-**Check pyscript logs (inside container):**
-```bash
-ssh pi@[YOUR_HA_HOST] "docker logs homeassistant 2>&1 | grep ev_optimizer | tail -30"
-ssh pi@[YOUR_HA_HOST] "docker logs homeassistant 2>&1 | grep ev_control | tail -30"
-```
-
-**Reload pyscript after file changes:**
-```bash
-curl -s -X POST -H "Authorization: Bearer TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{}' \
-  https://[YOUR_HA_HOSTNAME]:8123/api/services/pyscript/reload
-```
-
-**Full HA restart:**
-```bash
-ssh pi@[YOUR_HA_HOST] "docker restart homeassistant"
-```
-
-**Set a test deadline 2 hours from now and 5 kWh target:**
-Developer Tools → States → set `input_datetime.ev_deadline` to a time 2h from now, set `input_number.ev_required_kwh` to 5.0, then trigger recompute. Check `sensor.ev_schedule` for windows.
-
-35. **Mercedes PHEV minimum charge current is 10A (2026-04-27)**: The car terminates the charging session if the current limit falls below approximately 10A (6.93 kW on 3-phase 400V). `CHARGER_MIN_AMPS = 10` (was 6). `_apply_tariff_current()` computes `raw_amps = int(max_kw × 1000 / (400 × 1.732))` and checks `raw_amps < CHARGER_MIN_AMPS` before calling `set_charge_current()`: if the configured tariff power would produce fewer than 10A, it logs a warning, calls `reset_to_full_current()`, and returns — leaving ON/OFF control (via the consumption guard) to handle the cap. `set_charge_current()` itself also clamps to `[CHARGER_MIN_AMPS, CIRCUIT_MAX_AMPS]` as a second line of defence, but the pre-check is required to avoid calling `set_charge_current(4)` which would silently clamp to 10A instead of triggering the ON/OFF fallback path.
-
-37. **Consumption guard uses stateless latest-start algorithm — no cooldown boolean needed (2026-04-27)**: The old guard used `input_boolean.ev_consumption_guard_active` as a cooldown flag + `task.sleep` until next hour to prevent a toggle loop. Replaced by the price-aware latest-start algorithm (see quirk 12) which is inherently non-toggling: once `now >= latest_start_minute`, the guard returns `(False, "", None)` on every tick for the rest of the hour. The boolean still exists in the YAML and Lovelace but is never set/cleared by the guard code — it's a dormant indicator. `reset_consumption_guard_hourly` still runs hourly and clears the boolean as a dormant safety net.
-
-36. **`_apply_tariff_current()` is called on fresh start only, never mid-session (2026-04-27)**: Adjusting the current limit on an already-charging session causes the Mercedes PHEV to terminate the session (Zaptec firmware re-negotiates, car sees the new lower limit and ends the session). `set_charger()` calls `_apply_tariff_current()` only in the `on != current` branch (fresh start), with a `task.sleep(2)` guard before the call to give Zaptec time to transition from `connected_requesting` → `connected_charging` before the current write is sent. The `else` branch (`on == current`, charger already ON) no longer calls `_apply_tariff_current()` at all — tariff-hour boundary transitions are handled by the next fresh start cycle.
-
-38. **`binary_sensor.ev_deadline_pressure` reads from template sensors, not raw entities (2026-04-27)**: The binary sensor reads `sensor.ev_slots_needed` and `sensor.ev_slots_available` rather than recalculating from `ev_remaining_kwh` directly. This means any fix to `sensor.ev_slots_needed` (e.g. the tariff-power-aware calculation) automatically flows through to deadline pressure. The sensor also guards `slots_needed > 0` (no pressure when battery is already full or no target) and checks that a future deadline actually exists via `ev_computed_deadline` or `ev_deadline` timestamp > now + 300s. Root cause of the 172-slots bug: the old `ev_slots_needed` template used `ev_max_tariff_power_kw` directly as the charging power during tariff hours; when that entity was transiently set to a low value (e.g. 0.057 kW) the slots calculation exploded. Fixed by the tariff-throttling guard in the template and by the 0 = disabled logic.
-
-40. **"Clearing" `ev_deadline` means setting it to 2000-01-01 (2026-04-27)**: HA `input_datetime` does not support a true empty/null state — there is always a value. The convention for "no manual deadline" is to set `ev_deadline` to `2000-01-01 00:00:00`. Both `get_effective_deadline()` (pyscript, requires `ts > now + 5 min`) and the grid card status (`loadStatus()`, requires `ts > Date.now() + 5min`) treat any timestamp in the past as invalid and fall through to `ev_computed_deadline` or opportunistic mode. The safety automation `ev_safety_manual_deadline_passed` uses `> 946684800` (2000-01-01 UTC epoch) as its lower bound, ensuring the reset value never re-triggers the automation. The "Clear manual departure override" button in the grid card applies this sentinel value and immediately refreshes the status display.
-
-41. **Manual deadline is an additional departure, not an override (2026-04-27)**: `get_effective_deadline()` treats `ev_deadline` and `ev_computed_deadline` as equal candidates — both are added to the list if they are > 5 min in the future, and the NEAREST one wins. Setting a manual `ev_deadline` for a future trip (e.g. Wed 20:00) does NOT suppress the weekly auto schedule (e.g. Tue 09:00); the optimizer charges for Tuesday's departure first and then automatically switches to Wednesday's manual deadline once Tuesday passes. This is the correct UX: "I also need the car at this time" not "ignore my weekly schedule". `get_effective_deadline()` logs each candidate individually at INFO level and logs the final nearest-wins selection with the secondary deadline included. The grid card `loadStatus()` and Lovelace markdown card both show ALL valid future deadlines simultaneously (Active/Also rows).
-
-42. **`schedule_watchdog()` skips recompute when deadline is imminent, passed, or car is already full (2026-04-28/2026-04-29)**: The watchdog fires every 15 minutes and recomputes when the schedule is empty but a deadline exists. Two suppression guards prevent spurious recomputes: (1) **Imminence guard** — skip when `deadline_ts - now_ts < 1800` (< 30 min) or when the deadline has already passed; these produce `"deadline imminent/already passed, empty schedule expected — skipping"` at DEBUG. (2) **Full-battery guard** — skip when `sensor.ev_remaining_kwh ≤ 0.2 kWh`; when the car is fully charged the schedule is correctly empty and recomputing would waste CPU and spam WARNING logs. Produces `"target met (remaining=X.XX kWh ≤ 0.2), empty schedule expected — skipping recompute"` at DEBUG. Both checks run before the WARNING + `ev_optimizer_recompute()` call. Only fire WARNING recompute when schedule is empty AND deadline > 30 min AND remaining > 0.2 kWh.
-
-44. **Deadline pressure bypasses hysteresis at step 8 (2026-04-29)**: Step 8 of the priority chain forces charging ON when `binary_sensor.ev_deadline_pressure` is true and the consumption guard has cleared (at step 7). Previously `check_hysteresis(True)` was called here, which could hold charging OFF for up to 15 minutes even during an emergency deadline. Removed: step 8 now calls `set_charger(True, ...)` directly. Hysteresis still applies at step 9 (normal in-window schedule following). **Do not add `check_hysteresis()` back to the deadline-pressure path** — it defeats the purpose of having an emergency override.
-
-45. **`on_input_changed()` fires `ev_control_loop()` immediately after recompute (2026-04-29)**: After `ev_optimizer_recompute()` + 1 s settle time, `on_input_changed()` calls `pyscript.ev_control_loop()` (via the @service cross-file mechanism). This means any input change (deadline, target, mode) triggers a charging decision within ~3 s rather than waiting up to 5 min for the next tick. The 1 s sleep allows `sensor.ev_schedule` state to settle after the recompute write. See quirk 48 for cross-file calling rules.
-
-43. **Safety automations must not set `input_select.ev_charging_mode` to Stop (2026-04-28)**: Setting the mode to Stop in a safety automation requires manual user intervention to recover — the system stays stopped until the user changes it back to Smart. Removed the `input_select.select_option` action from automation `1745760001` (ev_safety_target_reached). Automations must only: stop Zaptec charging, update `ev_decision_reason`, reset `ev_deadline` to 2000-01-01 if applicable. Leaving mode as Smart means the control loop recovers automatically at the next tick for the next scheduled departure.
-
-46. **`on_price_update()` must call `pyscript.ev_control_loop()` after recompute (2026-04-29)**: When a Nordpool price update invalidates the current charging window (e.g. price spikes from the previous hour's cheap slot to the new hour's expensive slot), the schedule is recomputed immediately but the charger state was not updated until the next 5-minute tick — up to 5 minutes of unnecessary high-cost charging. Fixed: `on_price_update()` now calls `ev_control_loop()` after `ev_optimizer_recompute()` (with a 1 s settle sleep between them), mirroring the pattern already used in `on_input_changed()`. Root cause confirmed on 2026-04-29: optimizer had a window at ~20:59 (from the 20:00 hourly recompute), Nordpool updated to 2.306 SEK/kWh at 21:00 and the recompute removed the window, but charging continued until the `electrical_extreme_high_consumption` backup automation stopped it at 21:03. Without this fix the charger would have run until the 21:04 tick. **Do not remove `automation.electrical_extreme_high_consumption`** — it is a valid independent safety net for any future case where the optimizer fails to stop in time; it must fire unconditionally (no Smart-mode bypass condition).
-
-48. **Pyscript cross-file function calls require `@service` + `pyscript.func_name()` (2026-04-29)**: Plain undecorated functions are NOT in pyscript's shared namespace across files — only `@service` and trigger-decorated functions are exported. Calling a plain function from another file fails with `NameError: name 'func_name' is not defined`. Fix: (1) add `@service` to the target function in its own file; (2) call it from other files as `pyscript.func_name()` (NOT `func_name()` directly). `pyscript.func_name()` works as a fire-and-forget async call to the service. The `@service` decorator also registers the function as a callable HA service (`pyscript.func_name`) for use from automations or Developer Tools. Direct calls within the SAME file (e.g. `ev_control_loop_tick()` calling `ev_control_loop()`) still work as regular function calls regardless of whether `@service` is present. **Do NOT call `pyscript.func_name()` from within the same file** — use the direct function call instead, as cross-file pyscript service calls are async (fire-and-forget) while in-file calls are synchronous.
-
-47. **Consumption guard must only run when optimizer wants to charge (2026-04-29)**: The guard was previously at step 4 (before schedule evaluation), so it ran unconditionally and produced misleading "Consumption guard: holding OFF — optimal start at HH:MM" messages even when the optimizer had correctly decided not to charge because prices were expensive or outside a scheduled window. Moved to step 7: the guard is now only reached when `desired=True` (in a scheduled window) or `forced_on=True` (deadline pressure). Step 6 routes the outside-window+no-pressure case directly to OFF without ever entering the guard. This way the `ev_decision_reason` correctly shows "Outside scheduled windows (X.XXX SEK/kWh) — deadline: auto ..." rather than a spurious optimal-start time when the system is correctly idle.
-
-49. **`ev_slots_needed` is cap-aware during tariff hours (2026-04-29)**: The template sensor computes slots differently depending on whether the tariff guard is active and `ev_max_hourly_kwh > 0`. During tariff hours (06:00–22:00) with guard on and cap set: `ev_headroom = cap_kwh - house_kw`; `slots_per_hour = int(ev_headroom / (charger_kw × 0.25))` (min 1); `hours_needed = ceil(remaining / ev_headroom)`; result = `hours_needed × slots_per_hour`. Returns 999 when headroom ≤ 0 (house already exceeds cap). Outside tariff hours or cap disabled: `ceil(remaining / charger_kw / 0.25)` as before. This prevents `ev_deadline_pressure` from under-counting — without the fix, a 7.0 kW remaining target in a 1-slot/hour cap scenario would show 4 slots needed when the true answer is 4 hours × 1 slot = 4 slots (which may happen to match, but for different remaining values the naive formula was wrong). The template uses `sensor.tibber_pulse_dianavagen_15_average_power` as the house draw estimate; defaults to 0 W (fail-open) if unavailable.
-
-39. **Nordpool `raw_today`/`raw_tomorrow` slot fields are datetime objects in pyscript (2026-04-27)**: `state.getattr("sensor.nordpool_kwh_se3_sek_3_10_025")["raw_today"]` returns a list of dicts where `slot["start"]` and `slot["end"]` are already-parsed `datetime` objects, not ISO format strings. Calling `datetime.fromisoformat(slot["start"])` raises `TypeError: fromisoformat: argument must be str`. Fix in `get_slot_price()`: `start_raw = slot["start"]; slot_start = (datetime.fromisoformat(start_raw) if isinstance(start_raw, str) else start_raw).astimezone(timezone.utc)`. The same two-path handling is needed for `slot["end"]`. This affects `ev_control_loop.py` only — `ev_optimizer.py` uses `raw_today`/`raw_tomorrow` differently (iterates the top-level price lists, not the raw slot dicts with start/end fields).
 
 ## Future Work
 
-- **Load balancing**: Read `sensor.tibber_pulse_dianavagen_15_power` (house power) and reduce charging current via `zaptec.limit_current` when house load is high, to stay within fuse limits.
-- **Multi-rate tariffs**: The Nordpool price does not include grid tariffs which vary by hour. Incorporate `sensor.electric_nordpool_current_price` (all-in price ×~100 SEK/kWh) for true cost optimization.
-- **Dashboard card improvements**: A basic card was added via the HA GUI (storage/UI mode — not a file). HA is in storage mode so card config lives in `/media/pi/NextCloud/homeassistant/.storage/lovelace.lovelace` and must be edited through the GUI or the Lovelace REST API. To recreate the card, add a new Manual card with this YAML:
-  ```yaml
-  type: vertical-stack
-  title: EV Charging Optimizer
-  cards:
-    - type: entities
-      title: Controls
-      entities:
-        - entity: input_select.ev_charging_mode
-        - entity: input_number.ev_required_kwh
-        - entity: input_datetime.ev_deadline
-        - entity: input_text.ev_decision_reason
-          name: Decision reason
-    - type: entities
-      title: Status
-      entities:
-        - entity: sensor.ev_remaining_kwh
-        - entity: sensor.ev_slots_needed
-        - entity: sensor.ev_slots_available
-        - entity: binary_sensor.ev_deadline_pressure
-        - entity: sensor.jbb78w_state_of_charge
-          name: Car SoC
-        - entity: sensor.ev_charging_power_kw
-    - type: conditional
-      conditions:
-        - condition: template
-          value_template: >
-            {{ state_attr('input_datetime.ev_computed_deadline', 'timestamp') | float(0) > now().timestamp() }}
-      card:
-        type: entities
-        entities:
-          - entity: input_datetime.ev_computed_deadline
-            name: Next auto departure
-    - type: markdown
-      content: |
-        {% set schedule = state_attr('sensor.ev_schedule', 'schedule') %}
-        {% set now_ts = now().timestamp() %}
-        **⚡ Charging Schedule**
-        {% if not schedule or schedule | length == 0 %}
-        *No charging windows scheduled*
-        {% else %}
-        | # | Time | Price | Energy |
-        |---|------|-------|--------|
-        {% for w in schedule %}
-        {%   set start_ts = (w.start | as_datetime).timestamp() %}
-        {%   set end_ts   = (w.end   | as_datetime).timestamp() %}
-        {%   set start_str = w.start | as_datetime | as_local | string %}
-        {%   set end_str   = w.end   | as_datetime | as_local | string %}
-        {%   set h_s = start_str[11:16] %}
-        {%   set h_e = end_str[11:16]   %}
-        {%   if start_ts > now_ts %}
-        {%     set icon = "⏳" %}
-        {%   elif end_ts > now_ts %}
-        {%     set icon = "🔋" %}
-        {%   else %}
-        {%     set icon = "✅" %}
-        {%   endif %}
-        | {{ icon }} {{ loop.index }} | {{ h_s }}–{{ h_e }} | {{ w.price | round(3) }} SEK | {{ w.kwh | round(2) }} kWh |
-        {% endfor %}
-        ---
-        **Total:** {{ state_attr('sensor.ev_schedule', 'total_kwh') | round(2) }} kWh ·
-        **Est. cost:** {{ state_attr('sensor.ev_schedule', 'expected_cost') | round(2) }} SEK ·
-        **Mode:** {{ state_attr('sensor.ev_schedule', 'mode') }}
-        {% set next_start = namespace(ts=0) %}
-        {% for w in schedule %}
-        {%   set s = (w.start | as_datetime).timestamp() %}
-        {%   if s > now_ts and next_start.ts == 0 %}
-        {%     set next_start.ts = s %}
-        {%   endif %}
-        {% endfor %}
-        {% if next_start.ts > 0 %}
-        {% set diff = (next_start.ts - now_ts) | int %}
-        **Next window in:** {{ diff // 3600 }}h {{ (diff % 3600) // 60 }}min
-        {% endif %}
-        {% endif %}
-  ```
-  The `attributes.schedule` list uses ISO strings (`"start"`, `"end"` with `+02:00` offset). Parse with `(w.start | as_datetime).timestamp()` for epoch comparisons. `w.start | as_datetime | as_local | string` gives a string where `[11:16]` extracts `HH:MM`.
-  Icons: ⏳ upcoming, 🔋 currently charging, ✅ completed.
-  The card is added to the "car" view in Lovelace storage (`.storage/lovelace.lovelace`) — position index 4 in sections[0].cards (between Status entities and Tariff protection heading).
-- **Adaptive power**: Zaptec GO supports per-phase current control. Could charge at reduced rate during moderately-priced slots rather than full on/off.
-- **Notification on missed target**: If EV departures without reaching target SoC, send a mobile notification.
-- **Solar integration**: If a solar inverter sensor is added, bias slot selection toward midday when solar production is high.
-- **Price spike guard**: Add a hard ceiling price (e.g., 2.0 SEK/kWh) above which charging never starts, regardless of schedule or deadline pressure.
-
-## Version Control
-
-| Item | Value |
-|------|-------|
-| Repo | https://github.com/PetrolHead2/EV-Charging-Optimizer |
-| Local | `~/projects/EV-Charging-Optimizer/` |
-
-To sync changes from HA to repo:
-```bash
-cd ~/projects/EV-Charging-Optimizer
-./sync_from_ha.sh
-git add .
-git commit -m "describe your change"
-git push
-```
-
-**WARNING**: Never commit the real `HA_TOKEN`.
-`sync_from_ha.sh` scrubs it automatically.
-Always sync via the script, never copy manually.
+- **Load balancing**: Reduce current via `zaptec.limit_current` when house load is high.
+- **Multi-rate tariffs**: Incorporate all-in price (`sensor.electric_nordpool_current_price`) for true cost optimization.
+- **Dashboard**: Card in `.storage/lovelace.lovelace` sections[0].cards index 4. Key entities: `ev_charging_mode`, `ev_required_kwh`, `ev_deadline`, `ev_decision_reason`, `ev_remaining_kwh`, `ev_slots_needed`, `ev_slots_available`, `ev_deadline_pressure`, `jbb78w_state_of_charge`, `ev_charging_power_kw`, `ev_computed_deadline`. Markdown card renders `attributes.schedule` list (ISO strings; `(w.start | as_datetime).timestamp()` for epoch; `[11:16]` = HH:MM; icons ⏳/🔋/✅).
+- **Adaptive power**: Per-phase current control for mid-price slots.
+- **Notification on missed target**: Mobile alert if EV departs below target SoC.
+- **Solar integration**: Bias slot selection toward midday solar production.
+- **Price spike guard**: Hard ceiling (e.g. 2.0 SEK/kWh) above which charging never starts.
