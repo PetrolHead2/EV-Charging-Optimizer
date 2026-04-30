@@ -97,15 +97,27 @@ template:
             {%- set hour = now().hour -%}
             {%- set guard = is_state('input_boolean.ev_tariff_guard_enabled', 'on') -%}
             {%- set tariff = (hour >= 6 and hour < 22) and guard -%}
-            {%- set max_kw = states('input_number.ev_max_tariff_power_kw') | float(0) -%}
-            {%- set tariff_throttling = tariff and max_kw > 0
-               and (max_kw * 1000 / (400 * 1.732)) >= 10 -%}
-            {%- set power = max_kw if tariff_throttling else
-               states('sensor.ev_charging_power_kw') | float(7.0) -%}
-            {%- if power > 0 -%}
-              {{ (remaining / power / 0.25) | round(0, 'ceil') | int }}
+            {%- set charger_kw = states('sensor.ev_charging_power_kw') | float(7.0) -%}
+            {%- set cap_kwh = states('input_number.ev_max_hourly_kwh') | float(0) -%}
+            {%- set house_kw = states(
+                'sensor.tibber_pulse_dianavagen_15_average_power') | float(0) / 1000 -%}
+            {%- if tariff and cap_kwh > 0 -%}
+              {# During tariff hours with cap active: effective delivery rate is
+                 limited to ev_headroom kWh per hour. Calculate hours needed then
+                 multiply by slots per hour to get total slots estimate. #}
+              {%- set ev_headroom = cap_kwh - house_kw -%}
+              {%- if ev_headroom > 0 -%}
+                {%- set kwh_per_slot = charger_kw * 0.25 -%}
+                {%- set slots_per_hour = (ev_headroom / kwh_per_slot) | int -%}
+                {%- set slots_per_hour = [slots_per_hour, 1] | max -%}
+                {%- set hours_needed = (remaining / ev_headroom) | round(0, 'ceil') | int -%}
+                {{ (hours_needed * slots_per_hour) | int }}
+              {%- else -%}
+                999
+              {%- endif -%}
             {%- else -%}
-              0
+              {# Outside tariff hours or cap disabled: full charger power #}
+              {{ (remaining / charger_kw / 0.25) | round(0, 'ceil') | int }}
             {%- endif -%}
           {%- endif -%}
 

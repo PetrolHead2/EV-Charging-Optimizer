@@ -50,6 +50,8 @@ COMPUTED_DEADLINE_ENT  = "input_datetime.ev_computed_deadline"  # pyscript only
 SCHEDULE_ENT           = "sensor.ev_schedule"
 GUARD_ENT              = "input_boolean.ev_tariff_guard_enabled"
 MAX_TARIFF_KW_ENT      = "input_number.ev_max_tariff_power_kw"
+CAP_ENT                = "input_number.ev_max_hourly_kwh"
+HOUSE_PWR_ENT          = "sensor.tibber_pulse_dianavagen_15_average_power"
 CHARGE_PWR_ENT         = "sensor.ev_charging_power_kw"
 WEEKLY_SCHED_ENT       = "input_text.ev_weekly_schedule"
 AUTO_DEADLINE_ENT      = "input_boolean.ev_auto_deadline"
@@ -399,6 +401,69 @@ def merge_into_windows(slots):
     return windows
 
 
+def get_tariff_cap_slots_per_hour():
+    """
+    Calculate the maximum number of 15-minute EV charging slots allowed per
+    tariff hour, based on the hourly kWh cap and current house draw.
+
+    Returns:
+        int  : max slots per tariff hour (0–4)
+        None : cap disabled, guard off, or Tibber unavailable
+               (fail-open: no per-hour constraint applied)
+
+    Called by compute_schedule() before the global price sort so that
+    tariff-hour slots are capped at the source, not at execution time.
+    """
+    # Guard disabled — no cap applies
+    if (state.get(GUARD_ENT) or "off") != "on":
+        return None
+
+    # Read hourly kWh cap
+    cap_raw = state.get(CAP_ENT)
+    try:
+        cap_kwh = float(cap_raw) if cap_raw not in (None, "unknown", "unavailable") else 0.0
+    except (ValueError, TypeError):
+        cap_kwh = 0.0
+    if cap_kwh <= 0:
+        return None   # cap not configured
+
+    # Read house draw — fail-open if unavailable
+    pwr_raw = state.get(HOUSE_PWR_ENT)
+    try:
+        house_kw = float(pwr_raw) / 1000.0 \
+            if pwr_raw not in (None, "unknown", "unavailable") else None
+    except (ValueError, TypeError):
+        house_kw = None
+    if house_kw is None:
+        log.warning(
+            "ev_optimizer: Tibber average_power unavailable — "
+            "hourly cap constraint skipped (fail-open)"
+        )
+        return None
+
+    # EV headroom for one full hour = cap minus baseline house draw
+    ev_headroom_kwh = cap_kwh - house_kw
+    if ev_headroom_kwh <= 0:
+        log.warning(
+            f"ev_optimizer: house draw {house_kw:.2f} kW already meets or "
+            f"exceeds cap {cap_kwh:.1f} kWh — 0 EV slots available per hour"
+        )
+        return 0
+
+    # How many 15-min slots fit within the headroom at full charger power?
+    charger_kw   = float(state.get(CHARGE_PWR_ENT) or CHARGER_KW)
+    kwh_per_slot = charger_kw * SLOT_H          # typically 7.0 × 0.25 = 1.75 kWh
+    max_slots    = int(ev_headroom_kwh / kwh_per_slot)
+    max_slots    = max(0, min(max_slots, 4))     # clamp to [0, 4]
+
+    log.info(
+        f"ev_optimizer: tariff cap {cap_kwh:.1f} kWh "
+        f"- house {house_kw:.2f} kW = {ev_headroom_kwh:.2f} kWh EV headroom "
+        f"→ {max_slots} slot(s)/hour max at {charger_kw:.1f} kW"
+    )
+    return max_slots
+
+
 def compute_schedule(req_kwh, deadline_ts):
     """
     Select the cheapest slots within the eligible period to deliver req_kwh.
@@ -506,6 +571,46 @@ def compute_schedule(req_kwh, deadline_ts):
         f"  first={datetime.fromtimestamp(eligible[0]['start_ts'], local_tz).isoformat()}"
         f"  last_end={datetime.fromtimestamp(eligible[-1]['end_ts'], local_tz).isoformat()}"
     )
+
+    # ── Per-hour cap filter (tariff hours only) ───────────────────────────────
+    # Limit how many 15-min slots the optimizer may select within any single
+    # tariff hour (06:00–22:00) based on ev_max_hourly_kwh and current house
+    # draw.  Overnight slots pass through unconstrained.  When Tibber is
+    # unavailable or the guard is off, max_slots_per_hour is None and this
+    # block is skipped (fail-open: behaviour identical to before the fix).
+    max_slots_per_hour = get_tariff_cap_slots_per_hour()
+
+    if max_slots_per_hour is not None:
+        tariff_by_hour = {}
+        overnight_slots = []
+
+        for s in eligible:
+            local_hour = datetime.fromtimestamp(s["start_ts"], local_tz).hour
+            if TARIFF_HOUR_START <= local_hour < TARIFF_HOUR_END:
+                if local_hour not in tariff_by_hour:
+                    tariff_by_hour[local_hour] = []
+                tariff_by_hour[local_hour].append(s)
+            else:
+                overnight_slots.append(s)
+
+        capped_tariff = []
+        for hour in sorted(tariff_by_hour.keys()):
+            slots = tariff_by_hour[hour]
+            slots_sorted = sorted(slots, key=lambda x: x["price"])
+            kept = slots_sorted[:max_slots_per_hour]
+            capped_tariff.extend(kept)
+            if len(slots) > max_slots_per_hour:
+                log.info(
+                    f"ev_optimizer: hour {hour:02d}:xx — "
+                    f"capped {len(slots)} → {max_slots_per_hour} slot(s) "
+                    f"(hourly cap constraint)"
+                )
+
+        eligible = overnight_slots + capped_tariff
+        log.info(
+            f"ev_optimizer: after cap filter: {len(eligible)} eligible slots "
+            f"({len(overnight_slots)} overnight + {len(capped_tariff)} tariff-hour capped)"
+        )
 
     # Log cheapest 5 slots — makes it immediately visible whether tomorrow's
     # prices are included and whether the cheapest available slots are correct.
