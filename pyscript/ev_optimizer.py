@@ -55,6 +55,7 @@ HOUSE_PWR_ENT          = "sensor.tibber_pulse_dianavagen_15_average_power"
 ACCUM_ENT              = "sensor.tibber_pulse_dianavagen_15_accumulated_consumption_current_hour"
 MAX_PRICE_ENT          = "input_number.ev_max_price_sek"
 CHARGE_PWR_ENT         = "sensor.ev_charging_power_kw"
+CHARGER_MODE_ENT       = "sensor.laddbox_charger_mode"
 WEEKLY_SCHED_ENT       = "input_text.ev_weekly_schedule"
 AUTO_DEADLINE_ENT      = "input_boolean.ev_auto_deadline"
 
@@ -488,6 +489,22 @@ def get_tariff_cap_slots_per_hour():
                 "hourly cap constraint skipped (fail-open)"
             )
             return None
+
+    # Subtract EV charging power when the charger is active.
+    # Tibber measures total meter consumption including EV — using raw values
+    # inflates house_kw and under-counts available EV headroom.
+    if (state.get(CHARGER_MODE_ENT) or "") in ("connected_charging", "Charging"):
+        ev_raw = state.get(CHARGE_PWR_ENT)
+        try:
+            ev_kw = float(ev_raw) if ev_raw not in (None, "unknown", "unavailable") else CHARGER_KW
+        except (ValueError, TypeError):
+            ev_kw = CHARGER_KW
+        house_kw = max(0.0, house_kw - ev_kw)
+        log.debug(
+            f"get_tariff_cap_slots_per_hour: "
+            f"EV charging active, subtracted {ev_kw:.1f} kW "
+            f"→ house_only={house_kw:.3f} kW"
+        )
 
     # EV headroom for one full hour = cap minus baseline house draw
     ev_headroom_kwh = cap_kwh - house_kw

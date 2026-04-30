@@ -484,6 +484,40 @@ def get_smoothed_house_kw(now_dt, accumulated_kwh):
     return avg_kw
 
 
+def get_house_only_kw(accumulated_kwh, now_dt):
+    """
+    Returns current house-only power draw in kW, excluding EV charging.
+
+    Tibber measures total consumption at the meter including EV charging.
+    For guard calculations we need house-only draw to avoid feedback loop:
+      charger on → Tibber high → guard fires →
+      charger off → Tibber low → guard clears → charger on → repeat
+
+    Method:
+      1. Derive smoothed total draw via get_smoothed_house_kw()
+      2. If currently charging: subtract EV power from total
+      3. Return house-only draw clamped to 0
+    """
+    total_kw = get_smoothed_house_kw(now_dt, accumulated_kwh)
+    if total_kw is None:
+        return None
+
+    ev_kw = 0.0
+    if (state.get(CHARGER_MODE_ENT) or "") in CHARGING_STATES:
+        ev_raw = state.get(CHARGE_PWR_ENT)
+        try:
+            ev_kw = float(ev_raw) if ev_raw not in (None, "unknown", "unavailable") else 7.0
+        except (ValueError, TypeError):
+            ev_kw = 7.0
+        log.debug(
+            f"get_house_only_kw: total={total_kw:.3f} kW "
+            f"EV={ev_kw:.3f} kW "
+            f"house_only={max(0.0, total_kw - ev_kw):.3f} kW"
+        )
+
+    return max(0.0, total_kw - ev_kw)
+
+
 def check_consumption_guard():
     """
     Price-aware consumption guard using a latest-start calculation.
@@ -537,7 +571,7 @@ def check_consumption_guard():
     # Use smoothed house draw (accumulated / hours_elapsed) rather than
     # instantaneous average_power to avoid momentary spikes causing
     # unnecessary charging holds. Falls back to instantaneous for first 5 min.
-    current_house_kw = get_smoothed_house_kw(now_dt, accumulated_kwh)
+    current_house_kw = get_house_only_kw(accumulated_kwh, now_dt)
     if current_house_kw is None:
         log.warning(
             "ev_control_loop: Consumption guard: house draw unavailable "

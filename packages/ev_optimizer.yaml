@@ -158,11 +158,17 @@ template:
               | float(-1) -%}
           {%- set minutes_elapsed = now().minute + (now().second / 60.0) -%}
           {%- if accumulated < 0 or minutes_elapsed < 5 -%}
-            {{ states('sensor.tibber_pulse_dianavagen_15_average_power')
-               | float(0) / 1000 | round(3) }}
+            {%- set total_kw = states(
+                'sensor.tibber_pulse_dianavagen_15_average_power')
+                | float(0) / 1000 -%}
           {%- else -%}
-            {{ (accumulated / (minutes_elapsed / 60)) | round(3) }}
+            {%- set total_kw = accumulated / (minutes_elapsed / 60) -%}
           {%- endif -%}
+          {%- set charging = states('sensor.laddbox_charger_mode')
+              in ['connected_charging', 'Charging'] -%}
+          {%- set ev_kw = states('sensor.ev_charging_power_kw') | float(0)
+              if charging else 0 -%}
+          {{ [0, total_kw - ev_kw] | max | round(3) }}
         availability: >
           {{ states(
              'sensor.tibber_pulse_dianavagen_15_accumulated_consumption_current_hour')
