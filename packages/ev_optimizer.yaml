@@ -146,6 +146,28 @@ template:
             999
           {%- endif -%}
 
+      - name: "ev_house_draw_smoothed_kw"
+        unique_id: "ev_house_draw_smoothed_kw"
+        unit_of_measurement: "kW"
+        device_class: power
+        state_class: measurement
+        icon: mdi:home-lightning-bolt
+        state: >
+          {%- set accumulated = states(
+              'sensor.tibber_pulse_dianavagen_15_accumulated_consumption_current_hour')
+              | float(-1) -%}
+          {%- set minutes_elapsed = now().minute + (now().second / 60.0) -%}
+          {%- if accumulated < 0 or minutes_elapsed < 5 -%}
+            {{ states('sensor.tibber_pulse_dianavagen_15_average_power')
+               | float(0) / 1000 | round(3) }}
+          {%- else -%}
+            {{ (accumulated / (minutes_elapsed / 60)) | round(3) }}
+          {%- endif -%}
+        availability: >
+          {{ states(
+             'sensor.tibber_pulse_dianavagen_15_accumulated_consumption_current_hour')
+             not in ('unavailable', 'unknown') }}
+
     binary_sensor:
       - name: "ev_deadline_pressure"
         unique_id: "ev_deadline_pressure"

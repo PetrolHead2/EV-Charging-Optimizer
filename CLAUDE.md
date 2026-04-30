@@ -85,6 +85,7 @@ Local working copies: `/tmp/ev_optimizer_pkg.yaml`, `/tmp/ev_optimizer.py`, `/tm
 | `sensor.ev_slots_available` | 15-min slots until deadline (999 = no deadline) | slots |
 | `binary_sensor.ev_deadline_pressure` | True when deadline set AND slots_needed > 0 AND slots_available ≤ slots_needed+1 | — |
 | `sensor.ev_schedule` | State = compact epoch JSON `[{"s":ts,"e":ts},...]`; `attributes.schedule` has full ISO windows | — |
+| `sensor.ev_house_draw_smoothed_kw` | Smoothed house draw: `accumulated_kwh / hours_elapsed`. Falls back to instantaneous `average_power` for first 5 min of hour. Used by consumption guard and per-hour cap filter. | kW |
 
 ## Zaptec Device Structure
 
@@ -231,8 +232,6 @@ ssh pi@debian "docker logs homeassistant 2>&1 | grep -E 'ev_optimizer|ev_control
 
 | Feature | Description | Complexity |
 |---|---|---|
-| ~~Price spike ceiling~~ | ~~Hard max SEK/kWh above which charging never starts~~ | **Done** |
-| ~~House draw smoothing~~ | ~~Smoothed hourly average for consumption guard~~ | **Done** |
 | All-in price optimization | Use `sensor.electric_nordpool_current_price` (includes taxes/grid fees) instead of raw Nordpool spot for true cost optimization | Low |
 | Adaptive power | Per-phase current control for mid-price slots. Only viable for cars with minimum charge current < 6A — Mercedes PHEV minimum is 10A (6.93 kW), leaving no throttle headroom at current 7 kW installation | Medium |
 | SoC missed target alert | Mobile push notification if car departs (charger disconnects) below target SoC | Medium |
