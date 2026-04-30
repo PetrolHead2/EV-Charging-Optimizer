@@ -67,6 +67,7 @@ Local working copies: `/tmp/ev_optimizer_pkg.yaml`, `/tmp/ev_optimizer.py`, `/tm
 | `input_number.ev_required_kwh` | Energy target (0 = auto from SoC) |
 | `input_number.ev_max_hourly_kwh` | Hourly consumption cap for tariff guard (kWh, default 5.0) |
 | `input_number.ev_max_tariff_power_kw` | Max charge power during tariff hours (kW; 0 = disabled) |
+| `input_number.ev_max_price_sek` | Hard max price ceiling in SEK/kWh (0 = disabled, no ceiling) |
 | `input_select.ev_charging_mode` | Smart / Charge now / Stop |
 | `input_text.ev_decision_reason` | Human-readable last decision (max 255 chars) |
 | `input_text.ev_weekly_schedule` | JSON weekly departure schedule, max 255 chars e.g. `{"mon":["08:00"],...}` |
@@ -124,6 +125,7 @@ Reset circuit if stuck: `curl -X POST https://koffern.duckdns.org:8123/api/servi
 - `ev_deadline` is **NEVER written by pyscript**. `ev_computed_deadline` is **NEVER set by user**. Clear manual deadline: set to `2000-01-01 00:00:00` (sentinel).
 - Eligible slot window: `now - 900s → deadline` (−900s lookback keeps currently-active slot eligible)
 - Effective power per slot: overnight (outside 06:00–22:00) = `charger_kw × 0.25` kWh; tariff-hour = `max_tariff_power_kw × 0.25` kWh (full when 0 = disabled)
+- **Price ceiling**: `compute_schedule()` reads `input_number.ev_max_price_sek`; slots above the ceiling are removed from the candidate pool before selection. 0 = disabled. Does NOT block deadline pressure — `ev_control_loop` step 8 still forces ON when pressure is active even if schedule is empty. When schedule is empty due to ceiling, `ev_decision_reason` shows `"No slots below price ceiling (X.XX SEK/kWh, current Y.YYY SEK/kWh)"`.
 - **Per-hour cap**: `get_tariff_cap_slots_per_hour()` → `max_slots = int((cap_kwh − house_kw) / (charger_kw × 0.25))` clamped [0–4]; tariff-hour slots grouped by calendar hour, cheapest `max_slots` kept; overnight unconstrained; Tibber unavailable = fail-open
 - Post-selection: anti-toggling pass (merge isolated slots within 20% avg price) + surplus trim
 - Opportunistic mode (no valid deadline): `compute_opportunistic_schedule()` — all slots ≤ median price in next 24h; `mode="opportunistic"`, `required_slots=0`
@@ -170,7 +172,7 @@ All write `ev_decision_reason`. **NEVER set `ev_charging_mode` to Stop in automa
 9. **Config files are root-owned** — all debian writes require `sudo`. Use SCP + sudo cp workflow. No direct `sudo nano` from subagent (no TTY).
 10. **`switch.laddbox_charging` for start/stop** — `switch.turn_on/off(entity_id="switch.laddbox_charging")`. NOT button entities or `zaptec.resume_charging`/`zaptec.stop_charging` services (control loop only — safety automations do use `zaptec.stop_charging`).
 11. **`ev_max_tariff_power_kw = 0` disables throttling** — Mercedes PHEV min is 10A (6.93 kW on 3-phase 400V). Adjusting current mid-session terminates the session. Values < 10A equivalent treated as disabled. To re-enable throttling for another car: set `ev_max_tariff_power_kw ≥ 7.0 kW`.
-12. **Consumption guard latest-start algorithm** — `headroom = cap − accumulated_kwh`; `max_charge_min = headroom / (house_kw + ev_kw) × 60`; `latest_start = 60 − max_charge_min`. If `now ≥ latest_start` → allow. Else: if next-hour price < current×0.95 → skip to next hour; else → hold until latest_start. Fail-open if Tibber unavailable. `ev_consumption_guard_active` boolean is dormant (never written by guard). **Disable `ev_tariff_guard_enabled` on 2026-06-01** (Ellevio scraps power tariff scheme).
+12. **Consumption guard latest-start algorithm** — `headroom = cap − accumulated_kwh`; `max_charge_min = headroom / (house_kw + ev_kw) × 60`; `latest_start = 60 − max_charge_min`. If `now ≥ latest_start` → allow. Else: if next-hour price < current×0.95 → skip to next hour; else → hold until latest_start. Fail-open if Tibber unavailable. `ev_consumption_guard_active` boolean is dormant (never written by guard). **Disable `ev_tariff_guard_enabled` on 2026-06-01** (Ellevio scraps power tariff scheme). **House draw uses smoothed hourly average** (`accumulated_kwh / hours_elapsed`) rather than instantaneous `average_power` — avoids momentary spikes (kettle, oven) causing unnecessary holds. Falls back to instantaneous `average_power` for first 5 min of each hour when accumulated data is too sparse. Same smoothing applied in `get_tariff_cap_slots_per_hour()` in `ev_optimizer.py`.
 13. **Hysteresis timestamp** — `ev_last_state_change` is `"YYYY-MM-DD HH:MM:SS"` local Stockholm time. Parse: `strptime(..., "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ_LOCAL)`.
 14. **`input_text` max 255 chars** — `ev_weekly_schedule` uses all 255. Use compact JSON (no spaces). 2 times/day × 7 days ≈ 160 chars; 3 times/day ≈ 220 chars. Do NOT add `initial:` — overrides persisted data on restart.
 15. **Weekly schedule persistence** — persisted to `/config/pyscript/ev_schedule_data.json` via `task.executor(Path(...).write_text, data)`. Restored by `restore_weekly_schedule` startup trigger.
@@ -227,10 +229,13 @@ ssh pi@debian "docker logs homeassistant 2>&1 | grep -E 'ev_optimizer|ev_control
 
 ## Future Work
 
-- **Load balancing**: Reduce current via `zaptec.limit_current` when house load is high.
-- **Multi-rate tariffs**: Incorporate all-in price (`sensor.electric_nordpool_current_price`) for true cost optimization.
-- **Dashboard**: Card in `.storage/lovelace.lovelace` sections[0].cards index 4. Key entities: `ev_charging_mode`, `ev_required_kwh`, `ev_deadline`, `ev_decision_reason`, `ev_remaining_kwh`, `ev_slots_needed`, `ev_slots_available`, `ev_deadline_pressure`, `jbb78w_state_of_charge`, `ev_charging_power_kw`, `ev_computed_deadline`. Markdown card renders `attributes.schedule` list (ISO strings; `(w.start | as_datetime).timestamp()` for epoch; `[11:16]` = HH:MM; icons ⏳/🔋/✅).
-- **Adaptive power**: Per-phase current control for mid-price slots.
-- **Notification on missed target**: Mobile alert if EV departs below target SoC.
-- **Solar integration**: Bias slot selection toward midday solar production.
-- **Price spike guard**: Hard ceiling (e.g. 2.0 SEK/kWh) above which charging never starts.
+| Feature | Description | Complexity |
+|---|---|---|
+| ~~Price spike ceiling~~ | ~~Hard max SEK/kWh above which charging never starts~~ | **Done** |
+| ~~House draw smoothing~~ | ~~Smoothed hourly average for consumption guard~~ | **Done** |
+| All-in price optimization | Use `sensor.electric_nordpool_current_price` (includes taxes/grid fees) instead of raw Nordpool spot for true cost optimization | Low |
+| Adaptive power | Per-phase current control for mid-price slots. Only viable for cars with minimum charge current < 6A — Mercedes PHEV minimum is 10A (6.93 kW), leaving no throttle headroom at current 7 kW installation | Medium |
+| SoC missed target alert | Mobile push notification if car departs (charger disconnects) below target SoC | Medium |
+| HA Energy dashboard integration | Report charging cost and kWh to HA Energy dashboard for monthly cost tracking | Medium |
+| Native Lovelace card | Replace iframe grid card with a proper custom:html-card or JS module to eliminate token storage in HTML file | Medium |
+

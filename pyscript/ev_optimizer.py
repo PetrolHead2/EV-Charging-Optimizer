@@ -52,6 +52,8 @@ GUARD_ENT              = "input_boolean.ev_tariff_guard_enabled"
 MAX_TARIFF_KW_ENT      = "input_number.ev_max_tariff_power_kw"
 CAP_ENT                = "input_number.ev_max_hourly_kwh"
 HOUSE_PWR_ENT          = "sensor.tibber_pulse_dianavagen_15_average_power"
+ACCUM_ENT              = "sensor.tibber_pulse_dianavagen_15_accumulated_consumption_current_hour"
+MAX_PRICE_ENT          = "input_number.ev_max_price_sek"
 CHARGE_PWR_ENT         = "sensor.ev_charging_power_kw"
 WEEKLY_SCHED_ENT       = "input_text.ev_weekly_schedule"
 AUTO_DEADLINE_ENT      = "input_boolean.ev_auto_deadline"
@@ -427,19 +429,44 @@ def get_tariff_cap_slots_per_hour():
     if cap_kwh <= 0:
         return None   # cap not configured
 
-    # Read house draw — fail-open if unavailable
-    pwr_raw = state.get(HOUSE_PWR_ENT)
-    try:
-        house_kw = float(pwr_raw) / 1000.0 \
-            if pwr_raw not in (None, "unknown", "unavailable") else None
-    except (ValueError, TypeError):
-        house_kw = None
+    # Derive smoothed house draw from accumulated consumption.
+    # accumulated_kwh / hours_elapsed gives true hourly average and is immune
+    # to momentary spikes (kettle, oven, etc.) that affect average_power.
+    # Falls back to instantaneous average_power for the first 5 min of the hour
+    # when accumulated data is too sparse for a reliable average.
+    now_dt          = datetime.now(ZoneInfo(hass.config.time_zone))
+    minutes_elapsed = now_dt.minute + (now_dt.second / 60.0)
+    accum_raw       = state.get(ACCUM_ENT)
+    house_kw        = None
+
+    if minutes_elapsed >= 5 and accum_raw not in (None, "unknown", "unavailable"):
+        try:
+            accumulated_kwh = float(accum_raw)
+            house_kw = accumulated_kwh / (minutes_elapsed / 60.0)
+            log.debug(
+                f"get_tariff_cap_slots_per_hour: smoothed house_kw={house_kw:.3f} "
+                f"from {accumulated_kwh:.3f} kWh in {minutes_elapsed:.1f} min"
+            )
+        except (ValueError, TypeError):
+            house_kw = None
+
     if house_kw is None:
-        log.warning(
-            "ev_optimizer: Tibber average_power unavailable — "
-            "hourly cap constraint skipped (fail-open)"
-        )
-        return None
+        # Fallback: instantaneous average_power (early in hour, or accumulated N/A)
+        pwr_raw = state.get(HOUSE_PWR_ENT)
+        if pwr_raw in (None, "unknown", "unavailable"):
+            log.warning(
+                "ev_optimizer: Tibber house power unavailable — "
+                "hourly cap constraint skipped (fail-open)"
+            )
+            return None
+        try:
+            house_kw = float(pwr_raw) / 1000.0
+        except (ValueError, TypeError):
+            log.warning(
+                "ev_optimizer: Tibber house power parse error — "
+                "hourly cap constraint skipped (fail-open)"
+            )
+            return None
 
     # EV headroom for one full hour = cap minus baseline house draw
     ev_headroom_kwh = cap_kwh - house_kw
@@ -571,6 +598,36 @@ def compute_schedule(req_kwh, deadline_ts):
         f"  first={datetime.fromtimestamp(eligible[0]['start_ts'], local_tz).isoformat()}"
         f"  last_end={datetime.fromtimestamp(eligible[-1]['end_ts'], local_tz).isoformat()}"
     )
+
+    # ── Price ceiling filter ──────────────────────────────────────────────────
+    # Remove slots above the configured hard maximum price.
+    # 0 = disabled (current behavior — no ceiling applied).
+    # Note: this affects slot selection only. If no slots pass the filter AND
+    # deadline pressure is active, ev_control_loop step 8 will still force
+    # charging ON — the ceiling is a preference, not a hard stop.
+    max_price_raw = state.get(MAX_PRICE_ENT)
+    try:
+        max_price = float(max_price_raw) \
+            if max_price_raw not in (None, "unknown", "unavailable") else 0.0
+    except (ValueError, TypeError):
+        max_price = 0.0
+
+    if max_price > 0:
+        before_count = len(eligible)
+        eligible = [s for s in eligible if s["price"] <= max_price]
+        removed  = before_count - len(eligible)
+        if removed > 0:
+            log.info(
+                f"ev_optimizer: price ceiling {max_price:.2f} SEK/kWh removed "
+                f"{removed} slots from candidate pool"
+            )
+        if not eligible:
+            log.warning(
+                f"ev_optimizer: ALL slots exceed price ceiling "
+                f"{max_price:.2f} SEK/kWh — no slots available for scheduling. "
+                f"Deadline pressure will force charging if deadline is imminent."
+            )
+            return [], mode, 0
 
     # ── Per-hour cap filter (tariff hours only) ───────────────────────────────
     # Limit how many 15-min slots the optimizer may select within any single
@@ -952,6 +1009,7 @@ def ev_optimizer_recompute(**kwargs):
     "input_datetime.ev_computed_deadline",
     "input_number.ev_required_kwh",
     "input_number.ev_max_tariff_power_kw",
+    "input_number.ev_max_price_sek",
     "input_select.ev_charging_mode",
     "input_boolean.ev_auto_deadline",
     "input_boolean.ev_tariff_guard_enabled",

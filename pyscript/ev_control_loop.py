@@ -61,6 +61,7 @@ GUARD_ENT         = "input_boolean.ev_tariff_guard_enabled"
 GUARD_COOLDOWN_ENT = "input_boolean.ev_consumption_guard_active"
 MAX_KWH_ENT      = "input_number.ev_max_hourly_kwh"
 MAX_TARIFF_KW_ENT = "input_number.ev_max_tariff_power_kw"
+MAX_PRICE_ENT    = "input_number.ev_max_price_sek"
 SLOTS_AVAIL_ENT  = "sensor.ev_slots_available"
 SLOTS_NEEDED_ENT = "sensor.ev_slots_needed"
 
@@ -432,6 +433,48 @@ def get_slot_price(dt):
         return None
 
 
+def get_smoothed_house_kw(now_dt, accumulated_kwh):
+    """
+    Derive average house draw this hour from accumulated consumption.
+
+    Formula: accumulated_kwh / hours_elapsed
+    This is inherently smooth — it represents actual average draw since
+    the hour started, immune to momentary spikes (kettle, oven, etc.)
+    that cause instantaneous average_power to fluctuate.
+
+    Falls back to instantaneous average_power for the first 5 minutes
+    of each hour when accumulated data is too sparse for a reliable average.
+
+    Args:
+        now_dt          : timezone-aware datetime for the current moment
+        accumulated_kwh : float — kWh consumed since start of current hour
+
+    Returns:
+        float : smoothed house draw in kW
+        None  : data unavailable — caller should fail-open
+    """
+    minutes_elapsed = now_dt.minute + (now_dt.second / 60.0)
+
+    if minutes_elapsed < 5:
+        # Too early in the hour — instantaneous reading is more reliable
+        pwr_raw = state.get(TIBBER_AVG_W_ENT)
+        if pwr_raw in (None, "unavailable", "unknown"):
+            return None
+        try:
+            return float(pwr_raw) / 1000.0
+        except (ValueError, TypeError):
+            return None
+
+    # Smooth: actual average = kWh consumed / hours elapsed
+    hours_elapsed = minutes_elapsed / 60.0
+    avg_kw = accumulated_kwh / hours_elapsed
+    log.debug(
+        f"get_smoothed_house_kw: "
+        f"{accumulated_kwh:.3f} kWh in {minutes_elapsed:.1f} min = {avg_kw:.3f} kW avg"
+    )
+    return avg_kw
+
+
 def check_consumption_guard():
     """
     Price-aware consumption guard using a latest-start calculation.
@@ -471,20 +514,27 @@ def check_consumption_guard():
     if (state.get(GUARD_ENT) or "off") != "on":
         return False, "", None
 
-    # Read Tibber sensors — fail-open if unavailable
+    # Read accumulated consumption — fail-open if unavailable
     accum_raw = state.get(TIBBER_ACCUM_ENT)
-    avg_w_raw = state.get(TIBBER_AVG_W_ENT)
-
-    if accum_raw in (None, "unknown", "unavailable") or \
-       avg_w_raw  in (None, "unknown", "unavailable"):
+    if accum_raw in (None, "unknown", "unavailable"):
         log.warning(
-            "ev_control_loop: Consumption guard: Tibber sensor(s) "
+            "ev_control_loop: Consumption guard: Tibber accumulated sensor "
             "unavailable — skipping (fail-open)"
         )
         return False, "", None
 
-    accumulated_kwh   = float(accum_raw)
-    current_house_kw  = float(avg_w_raw) / 1000
+    accumulated_kwh  = float(accum_raw)
+
+    # Use smoothed house draw (accumulated / hours_elapsed) rather than
+    # instantaneous average_power to avoid momentary spikes causing
+    # unnecessary charging holds. Falls back to instantaneous for first 5 min.
+    current_house_kw = get_smoothed_house_kw(now_dt, accumulated_kwh)
+    if current_house_kw is None:
+        log.warning(
+            "ev_control_loop: Consumption guard: house draw unavailable "
+            "— skipping (fail-open)"
+        )
+        return False, "", None
     charging_power_kw = float(state.get(CHARGE_PWR_ENT) or 7.0)
     threshold         = float(state.get(MAX_KWH_ENT)    or 5.0)
 
@@ -689,12 +739,32 @@ def ev_control_loop():
             )
             set_charger(True, pressure_reason)
             return
+        # Check if price ceiling is the reason the schedule is empty
+        max_price_raw = state.get(MAX_PRICE_ENT)
+        try:
+            max_price = float(max_price_raw) \
+                if max_price_raw not in (None, "unknown", "unavailable") else 0.0
+        except (ValueError, TypeError):
+            max_price = 0.0
+        no_sched_reason = None
+        if max_price > 0:
+            price_raw = state.get(PRICE_ENT)
+            try:
+                current_price = float(price_raw) \
+                    if price_raw not in (None, "unknown", "unavailable") else None
+            except (ValueError, TypeError):
+                current_price = None
+            if current_price is not None and current_price > max_price:
+                no_sched_reason = (
+                    f"No slots below price ceiling "
+                    f"({max_price:.2f} SEK/kWh, current {current_price:.3f} SEK/kWh)"
+                )
         if _is_charging():
-            set_charger(False, "No schedule available — stopping unauthorised charge")
+            set_charger(False, no_sched_reason or "No schedule available — stopping unauthorised charge")
         else:
             input_text.set_value(
                 entity_id=REASON_ENT,
-                value="No schedule available — charger already off",
+                value=(no_sched_reason or "No schedule available — charger already off"),
             )
             log.debug("ev_control_loop: no schedule, charger already off — no action")
         return
