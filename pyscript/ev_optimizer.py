@@ -58,6 +58,27 @@ CHARGE_PWR_ENT         = "sensor.ev_charging_power_kw"
 WEEKLY_SCHED_ENT       = "input_text.ev_weekly_schedule"
 AUTO_DEADLINE_ENT      = "input_boolean.ev_auto_deadline"
 
+# ── All-in price calculation ───────────────────────────────────────────────────
+# Transforms raw Nordpool spot price to true consumer cost including VAT,
+# Ellevio grid fee and Swedish energy tax.
+# Formula: all_in = spot × 1.25 + 0.835 + 0.04803
+# Slot ranking is unchanged (monotonic transform — higher spot = higher all-in).
+USE_ALLIN_PRICE      = True    # set False to revert to raw spot prices
+PRICE_VAT_MULTIPLIER = 1.25    # 25% VAT
+PRICE_GRID_FEE_SEK   = 0.835   # Ellevio grid fee SEK/kWh
+PRICE_ENERGY_TAX_SEK = 0.04803 # Swedish energy tax SEK/kWh
+
+def spot_to_allin(spot_price):
+    """
+    Convert Nordpool spot price (SEK/kWh ex VAT) to all-in consumer price
+    including VAT, Ellevio grid fee and Swedish energy tax.
+    """
+    if not USE_ALLIN_PRICE:
+        return spot_price
+    return (spot_price * PRICE_VAT_MULTIPLIER
+            + PRICE_GRID_FEE_SEK
+            + PRICE_ENERGY_TAX_SEK)
+
 # ── Charger / slot constants ───────────────────────────────────────────────────
 TZ_LOCAL    = ZoneInfo("Europe/Stockholm")
 CHARGER_KW  = 7.0           # full-power fallback when sensor unavailable
@@ -127,7 +148,7 @@ def _build_slots():
                      else start_raw).astimezone(timezone.utc)
             end   = (datetime.fromisoformat(end_raw)   if isinstance(end_raw,   str)
                      else end_raw).astimezone(timezone.utc)
-            price = float(s["value"])
+            price = spot_to_allin(float(s["value"]))
         except Exception as exc:
             log.warning(f"ev_optimizer: _build_slots: skipping slot: {exc}")
             continue

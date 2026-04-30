@@ -126,7 +126,8 @@ Reset circuit if stuck: `curl -X POST https://koffern.duckdns.org:8123/api/servi
 - `ev_deadline` is **NEVER written by pyscript**. `ev_computed_deadline` is **NEVER set by user**. Clear manual deadline: set to `2000-01-01 00:00:00` (sentinel).
 - Eligible slot window: `now - 900s → deadline` (−900s lookback keeps currently-active slot eligible)
 - Effective power per slot: overnight (outside 06:00–22:00) = `charger_kw × 0.25` kWh; tariff-hour = `max_tariff_power_kw × 0.25` kWh (full when 0 = disabled)
-- **Price ceiling**: `compute_schedule()` reads `input_number.ev_max_price_sek`; slots above the ceiling are removed from the candidate pool before selection. 0 = disabled. Does NOT block deadline pressure — `ev_control_loop` step 8 still forces ON when pressure is active even if schedule is empty. When schedule is empty due to ceiling, `ev_decision_reason` shows `"No slots below price ceiling (X.XX SEK/kWh, current Y.YYY SEK/kWh)"`.
+- **All-in price**: `_build_slots()` converts raw Nordpool spot via `spot_to_allin()` before any ranking or cost calculation. Formula: `all_in = spot × 1.25 + 0.835 + 0.04803` (VAT 25%, Ellevio grid fee, energy tax). Slot ranking unchanged (monotonic). `expected_cost` and window prices in `sensor.ev_schedule` attributes reflect true consumer price. Set `USE_ALLIN_PRICE = False` to revert to raw spot. `get_slot_price()` in `ev_control_loop.py` uses mirrored `_spot_to_allin()` for consistency.
+- **Price ceiling**: `compute_schedule()` reads `input_number.ev_max_price_sek`; slots above the ceiling are removed from the candidate pool before selection. 0 = disabled. Ceiling is compared against all-in prices. Does NOT block deadline pressure — `ev_control_loop` step 8 still forces ON when pressure is active even if schedule is empty. When schedule is empty due to ceiling, `ev_decision_reason` shows `"No slots below price ceiling (X.XX SEK/kWh, current Y.YYY SEK/kWh)"`.
 - **Per-hour cap**: `get_tariff_cap_slots_per_hour()` → `max_slots = int((cap_kwh − house_kw) / (charger_kw × 0.25))` clamped [0–4]; tariff-hour slots grouped by calendar hour, cheapest `max_slots` kept; overnight unconstrained; Tibber unavailable = fail-open
 - Post-selection: anti-toggling pass (merge isolated slots within 20% avg price) + surplus trim
 - Opportunistic mode (no valid deadline): `compute_opportunistic_schedule()` — all slots ≤ median price in next 24h; `mode="opportunistic"`, `required_slots=0`
@@ -232,7 +233,7 @@ ssh pi@debian "docker logs homeassistant 2>&1 | grep -E 'ev_optimizer|ev_control
 
 | Feature | Description | Complexity |
 |---|---|---|
-| All-in price optimization | Use `sensor.electric_nordpool_current_price` (includes taxes/grid fees) instead of raw Nordpool spot for true cost optimization | Low |
+| ~~All-in price optimization~~ | ~~VAT + grid fee + energy tax via `spot_to_allin()`; formula: `spot × 1.25 + 0.835 + 0.04803`~~ | **Done** |
 | Adaptive power | Per-phase current control for mid-price slots. Only viable for cars with minimum charge current < 6A — Mercedes PHEV minimum is 10A (6.93 kW), leaving no throttle headroom at current 7 kW installation | Medium |
 | SoC missed target alert | Mobile push notification if car departs (charger disconnects) below target SoC | Medium |
 | HA Energy dashboard integration | Report charging cost and kWh to HA Energy dashboard for monthly cost tracking | Medium |

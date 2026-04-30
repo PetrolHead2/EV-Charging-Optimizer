@@ -81,6 +81,15 @@ TARIFF_HOUR_END    = 22
 TZ_LOCAL           = ZoneInfo("Europe/Stockholm")
 HYSTERESIS_MINUTES = 15
 
+# ── All-in price constants (mirror of ev_optimizer.py) ─────────────────────────
+# Used in get_slot_price() for consumption guard price comparisons.
+_PRICE_VAT  = 1.25
+_PRICE_GRID = 0.835
+_PRICE_TAX  = 0.04803
+
+def _spot_to_allin(spot):
+    return spot * _PRICE_VAT + _PRICE_GRID + _PRICE_TAX
+
 # ── Charger state sets ─────────────────────────────────────────────────────────
 # States where the car is connected and the session can be started or stopped.
 CHARGEABLE_STATES = {
@@ -426,7 +435,7 @@ def get_slot_price(dt):
             slot_start = (datetime.fromisoformat(start_raw) if isinstance(start_raw, str) else start_raw).astimezone(timezone.utc)
             slot_end   = (datetime.fromisoformat(end_raw)   if isinstance(end_raw,   str) else end_raw).astimezone(timezone.utc)
             if slot_start <= dt_utc < slot_end:
-                return float(slot["value"])
+                return _spot_to_allin(float(slot["value"]))
         return None
     except Exception as exc:
         log.warning(f"ev_control_loop: get_slot_price: failed: {exc}")
