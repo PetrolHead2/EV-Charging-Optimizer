@@ -702,6 +702,7 @@ def ev_control_loop():
     8. Deadline pressure        → force ON — guard cleared at step 7, NO hysteresis
     9. Inside scheduled window  → ON  (subject to hysteresis)
     """
+    task.unique("ev_control_loop")  # kill any stale concurrent instance; newest wins
     # ── Step 0: Connection guard — no car, no switch calls ────────────────────
     # switch.laddbox_charging is unavailable when no car is connected.
     # Bail out early and write a stable reason so the UI does not flicker.
@@ -899,17 +900,37 @@ def ev_control_loop():
 
     # ── Step 8: Deadline pressure — force ON (consumption guard cleared) ──────
     # Consumption guard passed at step 7, so it is safe to start charging.
-    # Hysteresis is NOT checked here — deadline pressure is a hard override.
-    # The system must start charging immediately when time is running out,
-    # regardless of how recently the last state change occurred.
+    # A 60-second anti-toggle guard is applied: if the charger changed state
+    # within the last 60 seconds, hold off and let Zaptec settle.  This
+    # breaks the stop → on_zaptec_state_changed → force-ON oscillation loop
+    # while still responding to genuine deadline pressure within one 5-min tick.
     if forced_on:
+        last_ts = (state.getattr(LAST_CHANGE_ENT) or {}).get("timestamp") or 0
+        try:
+            secs_since = datetime.now(tz=timezone.utc).timestamp() - float(last_ts)
+        except (ValueError, TypeError):
+            secs_since = 999
+
+        if secs_since < 60:
+            hold_reason = (
+                f"Deadline pressure: anti-toggle hold — "
+                f"{int(60 - secs_since)}s until 60s minimum elapsed "
+                f"({slots_avail} slots available, {slots_needed} needed)"
+            )
+            input_text.set_value(entity_id=REASON_ENT, value=hold_reason[:255])
+            log.info(
+                f"ev_control_loop: Priority step 8: deadline pressure anti-toggle: "
+                f"{secs_since:.0f}s since last change, holding 60s minimum"
+            )
+            return
+
         pressure_reason = (
             f"Deadline pressure: forced ON "
             f"({slots_avail} slots available, {slots_needed} needed)"
         )
         log.info(
             f"ev_control_loop: Priority step 8: deadline pressure → ON "
-            f"(bypassing hysteresis — {slots_avail} slots avail, {slots_needed} needed)"
+            f"({slots_avail} slots avail, {slots_needed} needed)"
         )
         set_charger(True, pressure_reason)
         return
@@ -983,6 +1004,16 @@ def on_zaptec_state_changed(value=None, old_value=None, **kwargs):
     log.info(
         f"ev_control_loop: Zaptec state changed: {old_value} → {value}"
     )
+    # connected_requesting is a transient state that always resolves to
+    # connected_charging within seconds. Spawning a full control loop here
+    # creates a redundant concurrent instance alongside the charging trigger
+    # and — when forced_on=True — can cause a stop→start oscillation loop.
+    if value == "connected_requesting":
+        log.debug(
+            f"ev_control_loop: on_zaptec_state_changed: "
+            f"skipping transient state {value}"
+        )
+        return
     if value not in CONNECTED_STATES:
         # Car unplugged or state unknown — no point running the control loop.
         # Write reason directly so the UI updates immediately.
