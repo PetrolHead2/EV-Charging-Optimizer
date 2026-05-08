@@ -32,9 +32,10 @@ Priority chain (evaluated top-to-bottom):
   1. Mode="Stop"          → always OFF, no exceptions
   2. Mode="Charge now"    → always ON,  no exceptions
   3. Deadline pressure    → set forced_on flag, do NOT return yet
-  4. Consumption guard    → ALWAYS runs, even during deadline pressure
+  4. Consumption guard    → runs when desired=True or forced_on=True
                             price-aware latest-start algorithm:
-                            if should_hold + forced_on → OFF + combined reason
+                            if should_hold + forced_on → LOG guard reason + fall through
+                                                         (deadline pressure wins at step 6)
                             if should_hold only        → OFF + guard reason
   5. No schedule          → if forced_on: force ON; else safe OFF
   6. Deadline pressure    → force ON, NO hysteresis (guard cleared, hard override)
@@ -698,7 +699,8 @@ def ev_control_loop():
     6. Outside window, no pressure → OFF with hysteresis; guard SKIPPED (not charging)
     7. Consumption guard        → only reached when desired=True or forced_on=True
                                    price-aware latest-start: if should_hold + forced_on
-                                   → OFF with combined reason; else → OFF with guard reason
+                                   → LOG + fall through (deadline overrides guard);
+                                   else if should_hold → OFF with guard reason
     8. Deadline pressure        → force ON — guard cleared at step 7, NO hysteresis
     9. Inside scheduled window  → ON  (subject to hysteresis)
     """
@@ -868,39 +870,29 @@ def ev_control_loop():
 
     if should_hold:
         if forced_on:
-            local_tz_now = ZoneInfo(hass.config.time_zone)
-            now_ts = datetime.now(tz=local_tz_now).timestamp()
-            if resume_at:
-                wait_mins = max(0, int((resume_at.timestamp() - now_ts) / 60))
-                combined_reason = (
-                    f"Deadline pressure active — "
-                    f"consumption guard holding OFF for ~{wait_mins} min | "
-                    f"{guard_reason}"
-                )
-            else:
-                combined_reason = (
-                    f"Deadline pressure active — "
-                    f"consumption guard holding OFF | "
-                    f"{guard_reason}"
-                )
+            # Deadline pressure overrides the consumption guard — the car must
+            # reach its charge target before departure regardless of hourly cost
+            # optimisation. Log the guard's recommendation but fall through to
+            # step 8 so deadline pressure forces ON.
             log.info(
                 f"ev_control_loop: Priority step 7: "
-                f"guard holds despite deadline — {combined_reason}"
+                f"guard would hold but deadline pressure overrides — {guard_reason}"
             )
-            set_charger(False, combined_reason[:255])
+            # Do NOT return — fall through to step 8 (forced_on → ON)
         else:
             log.info(
                 f"ev_control_loop: Priority step 7: "
                 f"consumption guard holding — {guard_reason}"
             )
             set_charger(False, guard_reason[:255])
-        return
+            return
 
     log.info("ev_control_loop: Priority step 7: consumption guard OK — charging allowed")
 
-    # ── Step 8: Deadline pressure — force ON (consumption guard cleared) ──────
-    # Consumption guard passed at step 7, so it is safe to start charging.
-    # A 60-second anti-toggle guard is applied: if the charger changed state
+    # ── Step 8: Deadline pressure — force ON ──────────────────────────────────
+    # Reached when forced_on=True, whether the consumption guard was satisfied
+    # or overridden. A 60-second anti-toggle guard is applied: if the charger
+    # changed state
     # within the last 60 seconds, hold off and let Zaptec settle.  This
     # breaks the stop → on_zaptec_state_changed → force-ON oscillation loop
     # while still responding to genuine deadline pressure within one 5-min tick.

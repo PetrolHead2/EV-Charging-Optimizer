@@ -147,8 +147,8 @@ Triggers: 5-min tick · startup · `laddbox_charger_mode → "charging"` · +3s 
 | 4 | No schedule | OFF, return |
 | 5 | Evaluate schedule | `desired = should_charge_now()` |
 | 6 | `not desired and not forced_on` | OFF, **skip guard entirely**, return |
-| 7 | Consumption guard check | Hold if over hourly cap (only reached when desired or forced_on) |
-| 8 | `forced_on` (deadline pressure) | ON **without hysteresis** |
+| 7 | Consumption guard check | If `should_hold` and NOT `forced_on`: OFF, return. If `should_hold` and `forced_on`: LOG guard reason, fall through (deadline wins). |
+| 8 | `forced_on` (deadline pressure) | ON **without hysteresis** — deadline pressure always overrides consumption guard |
 | 9 | `desired` (in scheduled window) | ON with 15-min hysteresis |
 
 ### Safety Layer (`packages/ev_optimizer.yaml`)
@@ -200,7 +200,7 @@ All write `ev_decision_reason`. **NEVER set `ev_charging_mode` to Stop in automa
 35. **Safety automations must not set mode to Stop** — requires manual recovery. Automations must only: stop Zaptec, write `ev_decision_reason`, optionally reset `ev_deadline` to `2000-01-01`.
 36. **`on_price_update()` must call `pyscript.ev_control_loop()` after recompute** — prevents up to 5 min of unnecessary charging when price spikes. Do NOT remove `automation.electrical_extreme_high_consumption`.
 37. **Pyscript cross-file calls** — only `@service`/trigger-decorated functions are in shared namespace. Call with `pyscript.func_name()` (async/fire-and-forget). Do NOT call `pyscript.func_name()` within the same file — use direct function call instead (cross-file calls are async; in-file calls are synchronous).
-38. **Consumption guard placement** — guard runs at step 7 only when `desired=True` or `forced_on=True`. Step 6 routes outside-window + no-pressure directly to OFF. Guard never runs when optimizer has decided not to charge.
+38. **Consumption guard placement** — guard runs at step 7 only when `desired=True` or `forced_on=True`. Step 6 routes outside-window + no-pressure directly to OFF. Guard never runs when optimizer has decided not to charge. **Deadline pressure overrides the guard**: when `forced_on=True` and the guard would hold, the guard is logged but execution falls through to step 8 which forces ON. The guard's "skip to next hour" logic must never block a car that needs to charge before departure.
 39. **`ev_slots_needed` cap-aware during tariff hours** — with guard on and cap > 0: `slots_per_hour = int(ev_headroom / (charger_kw × 0.25))` (min 1); `hours_needed = ceil(remaining / ev_headroom)`; result = `hours_needed × slots_per_hour`. Returns 999 when headroom ≤ 0. Outside tariff hours: `ceil(remaining / charger_kw / 0.25)`.
 40. **Nordpool `raw_*` slot fields are datetime objects in pyscript** — `slot["start"]`/`slot["end"]` are already parsed. Do NOT call `datetime.fromisoformat()` directly. Use: `(datetime.fromisoformat(s) if isinstance(s, str) else s).astimezone(timezone.utc)` for both start and end.
 41. **"No schedule available" / pyscript not loading** — normal on first start or when `ev_required_kwh=0` and SoC=100%. If pyscript services missing from `/api/services`: check `pyscript:` block in configuration.yaml; verify `GET /api/config` shows `pyscript` in components list.
