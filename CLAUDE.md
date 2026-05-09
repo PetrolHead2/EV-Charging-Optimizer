@@ -242,3 +242,79 @@ ssh pi@debian "docker logs homeassistant 2>&1 | grep -E 'ev_optimizer|ev_control
 | HA Energy dashboard integration | Report charging cost and kWh to HA Energy dashboard for monthly cost tracking | Medium |
 | Native Lovelace card | Replace iframe grid card with a proper custom:html-card or JS module to eliminate token storage in HTML file | Medium |
 
+## Perific Integration — Tibber Fallback
+
+A custom HA integration (perific_meter) is installed as a
+backup for the Tibber Pulse P1 sensor. Source repo:
+https://github.com/PetrolHead2/perific-meter
+
+### What the device is
+Perific (firmware 4.x) is a current-transformer load
+balancer. It measures current per phase only — no voltage
+hardware. Voltage is fixed at 230V nominal for power
+estimation. It also controls the Zaptec charger via a
+cloud reporter API.
+
+### Sensor entity IDs
+
+Meter sensors (device: Perific Measurement, 30s poll):
+
+| Entity ID | Unit | Notes |
+|---|---|---|
+| sensor.perific_measurement_current_l1 | A | Live current L1 |
+| sensor.perific_measurement_current_l2 | A | Live current L2 |
+| sensor.perific_measurement_current_l3 | A | Live current L3 |
+| sensor.perific_measurement_power_import | W | sum(iavg) × 230V estimated |
+| sensor.perific_measurement_energy_import | kWh | Cumulative lifetime counter (qmax / 19,565,000) |
+
+Zaptec reporter sensors (account-level, 60s poll):
+
+| Entity ID | Unit | Notes |
+|---|---|---|
+| sensor.perific_zaptec_allowed_current | A | 0 = no override in Open mode; active in Smart/Price mode |
+| sensor.perific_mains_fuse | A | House fuse ceiling (25A) |
+| sensor.perific_safe_mode_current | A | Charger fallback if cloud comms drop (6A) |
+| sensor.perific_charging_mode | — | Open / Smart / Price / Solar |
+
+### Tibber sensors this replaces
+
+| Tibber sensor | Perific fallback | Notes |
+|---|---|---|
+| sensor.tibber_pulse_dianavagen_15_average_power | sensor.perific_measurement_power_import | Same unit (W); Perific is 30s-stale vs Tibber near-realtime |
+| sensor.tibber_pulse_dianavagen_15_accumulated_consumption_current_hour | sensor.perific_energy_import_hour | Derived via utility_meter (see below) |
+| Per-phase current (not used directly in optimizer) | sensor.perific_measurement_current_l1/l2/l3 | Available if needed |
+
+### Accumulated hour fallback
+
+A utility_meter wraps the lifetime counter to produce an
+hourly-resetting kWh sensor equivalent to Tibber's
+accumulated_consumption_current_hour:
+
+  sensor.perific_energy_import_hour
+
+Configured in configuration.yaml:
+  utility_meter:
+    perific_energy_import_hour:
+      source: sensor.perific_measurement_energy_import
+      cycle: hourly
+
+### Known limitations
+
+- Power is estimated (iavg × 230V), not measured directly.
+  Will drift slightly when actual voltage deviates from 230V.
+- 30s poll lag means Perific power readings are stale during
+  fast-changing events (EV charging ramp-up). Acceptable for
+  the smoothed ev_house_draw_smoothed_kw input.
+- energy_import_total is a lifetime cumulative counter —
+  do not reset it. Use perific_energy_import_hour for
+  hourly consumption tracking.
+- AllowedCurrent = 0 in Open mode is correct (sentinel value,
+  not a measurement). Only becomes meaningful in Smart/Price
+  mode when Perific actively manages charger current.
+
+### Verification status (confirmed during live charging session)
+
+- current_l1/l2/l3: CORRECT
+- power_import_total: CORRECT (internally consistent)
+- energy_import_total: CORRECT (conversion factor verified)
+- All 4 Zaptec reporter sensors: CORRECT
