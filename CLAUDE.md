@@ -266,6 +266,7 @@ Meter sensors (device: Perific Measurement, 30s poll):
 | sensor.perific_measurement_current_l3 | A | Live current L3 |
 | sensor.perific_measurement_power_import | W | sum(iavg) × 230V estimated |
 | sensor.perific_measurement_energy_import | kWh | Cumulative lifetime counter (qmax / 19,565,000) |
+| sensor.perific_measurement_signal_strength | dBm | WiFi RSSI — diagnostic section of device page |
 
 Zaptec reporter sensors (account-level, 60s poll):
 
@@ -312,9 +313,33 @@ Configured in configuration.yaml:
   not a measurement). Only becomes meaningful in Smart/Price
   mode when Perific actively manages charger current.
 
+### Deployment workflow
+
+The git repo (`/tmp/perific-meter/` on pi) and the HA
+installed copy are separate. Code changes must be manually
+synced — git push alone does NOT update the running integration.
+
+```bash
+# From pi — sync one file (repeat for each changed file)
+scp /tmp/perific-meter/<file> pi@debian:/tmp/perific_<file>
+ssh pi@debian "echo eankod89 | sudo -S cp /tmp/perific_<file> \
+  /media/pi/NextCloud/homeassistant/custom_components/perific_meter/<file>"
+
+# Clear .pyc cache for changed Python files
+ssh pi@debian "echo eankod89 | sudo -S rm -f \
+  /media/pi/NextCloud/homeassistant/custom_components/perific_meter/__pycache__/<file>.cpython-314.pyc"
+
+# Restart HA
+ssh pi@debian "echo eankod89 | sudo -S docker restart homeassistant"
+```
+
+Installed path on debian:
+  /media/pi/NextCloud/homeassistant/custom_components/perific_meter/
+
 ### Verification status (confirmed during live charging session)
 
 - current_l1/l2/l3: CORRECT
 - power_import_total: CORRECT (internally consistent)
 - energy_import_total: CORRECT (conversion factor verified)
 - All 4 Zaptec reporter sensors: CORRECT
+- signal_strength (RSSI): CORRECT — live at −60 dBm
