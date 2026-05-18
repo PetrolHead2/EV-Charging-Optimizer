@@ -54,6 +54,10 @@ input_boolean:
     name: "EV consumption guard cooldown"
     initial: false
     icon: mdi:shield-alert
+  ev_preclimate_charging:
+    name: "EV charging triggered by preclimate"
+    initial: false
+    icon: mdi:car-defrost-front
 
 input_text:
   ev_weekly_schedule:

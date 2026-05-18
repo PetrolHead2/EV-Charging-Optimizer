@@ -22,11 +22,15 @@ Writes: switch.laddbox_charging
         input_datetime.ev_last_state_change
         input_text.ev_decision_reason
         input_boolean.ev_consumption_guard_active  (cooldown flag)
+        input_boolean.ev_preclimate_charging       (preclimate flag)
+        input_select.ev_charging_mode              (preclimate: Smart ↔ Charge now)
 
 Triggers:
   ev_control_loop_tick()       — @time_trigger every 5 min + startup
   on_zaptec_state_changed()    — @state_trigger sensor.laddbox_charger_mode
                                   (fires on connect, charging, finished, disconnect)
+  on_preclimate_changed()      — @state_trigger binary_sensor.jbb78w_preclimate_status
+                                  (switches to Charge now / reverts to Smart)
 
 Priority chain (evaluated top-to-bottom):
   1. Mode="Stop"          → always OFF, no exceptions
@@ -65,6 +69,8 @@ MAX_TARIFF_KW_ENT = "input_number.ev_max_tariff_power_kw"
 MAX_PRICE_ENT    = "input_number.ev_max_price_sek"
 SLOTS_AVAIL_ENT  = "sensor.ev_slots_available"
 SLOTS_NEEDED_ENT = "sensor.ev_slots_needed"
+PRECLIMATE_ENT      = "binary_sensor.jbb78w_preclimate_status"
+PRECLIMATE_FLAG_ENT = "input_boolean.ev_preclimate_charging"
 
 # ── Zaptec Charger (laddbox) — session-level entities ─────────────────────────
 # These affect only the active EV session, not the whole circuit.
@@ -1017,6 +1023,82 @@ def on_zaptec_state_changed(value=None, old_value=None, **kwargs):
     # Car is (now) connected — let HA state settle then run the full decision chain.
     task.sleep(2)
     ev_control_loop()
+
+
+# ── Preclimate trigger ────────────────────────────────────────────────────────
+
+@state_trigger("binary_sensor.jbb78w_preclimate_status")
+def on_preclimate_changed(value=None, old_value=None, **kwargs):
+    """
+    Switch to Charge now when preclimate activates; revert to Smart when done.
+
+    On activation (value="on"):
+      - Bail if car is not connected.
+      - Bail if mode is already Stop (respect manual stop).
+      - Otherwise: set mode=Charge now, set ev_preclimate_charging flag, run loop.
+
+    On deactivation (value="off"):
+      - Bail if ev_preclimate_charging flag is not set (manual Charge now → don't touch).
+      - If mode is no longer Charge now: clear flag only (user already changed it).
+      - Otherwise: revert mode to Smart, clear flag, run loop.
+    """
+    log.info(
+        f"ev_control_loop: preclimate status changed: {old_value} → {value}"
+    )
+
+    if value == "on":
+        zaptec_mode = state.get(CHARGER_MODE_ENT) or "unknown"
+        if zaptec_mode in DISCONNECTED_STATES or zaptec_mode in ("unknown", "unavailable"):
+            log.info(
+                f"ev_control_loop: preclimate ON but car not connected "
+                f"({zaptec_mode}) — no action"
+            )
+            return
+
+        current_mode = state.get(MODE_ENT) or "Smart"
+        if current_mode == "Stop":
+            log.info(
+                "ev_control_loop: preclimate ON but mode=Stop "
+                "— respecting manual stop, no action"
+            )
+            return
+
+        select.select_option(entity_id=MODE_ENT, option="Charge now")
+        input_boolean.turn_on(entity_id=PRECLIMATE_FLAG_ENT)
+        log.info(
+            "ev_control_loop: preclimate ON → mode set to Charge now, "
+            "ev_preclimate_charging flag set"
+        )
+        task.sleep(1)
+        pyscript.ev_control_loop()
+
+    elif value == "off":
+        preclimate_flag = state.get(PRECLIMATE_FLAG_ENT) or "off"
+
+        if preclimate_flag != "on":
+            log.info(
+                "ev_control_loop: preclimate OFF but ev_preclimate_charging "
+                "flag not set — no action"
+            )
+            return
+
+        current_mode = state.get(MODE_ENT) or "Smart"
+        if current_mode != "Charge now":
+            log.info(
+                f"ev_control_loop: preclimate OFF but mode={current_mode} "
+                "— clearing flag only"
+            )
+            input_boolean.turn_off(entity_id=PRECLIMATE_FLAG_ENT)
+            return
+
+        select.select_option(entity_id=MODE_ENT, option="Smart")
+        input_boolean.turn_off(entity_id=PRECLIMATE_FLAG_ENT)
+        log.info(
+            "ev_control_loop: preclimate OFF → mode reverted to Smart, "
+            "ev_preclimate_charging flag cleared"
+        )
+        task.sleep(1)
+        pyscript.ev_control_loop()
 
 
 # ── Consumption guard hourly reset ────────────────────────────────────────────
