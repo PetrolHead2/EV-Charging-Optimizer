@@ -1063,7 +1063,7 @@ def on_preclimate_changed(value=None, old_value=None, **kwargs):
             )
             return
 
-        select.select_option(entity_id=MODE_ENT, option="Charge now")
+        input_select.select_option(entity_id=MODE_ENT, option="Charge now")
         input_boolean.turn_on(entity_id=PRECLIMATE_FLAG_ENT)
         log.info(
             "ev_control_loop: preclimate ON → mode set to Charge now, "
@@ -1091,7 +1091,7 @@ def on_preclimate_changed(value=None, old_value=None, **kwargs):
             input_boolean.turn_off(entity_id=PRECLIMATE_FLAG_ENT)
             return
 
-        select.select_option(entity_id=MODE_ENT, option="Smart")
+        input_select.select_option(entity_id=MODE_ENT, option="Smart")
         input_boolean.turn_off(entity_id=PRECLIMATE_FLAG_ENT)
         log.info(
             "ev_control_loop: preclimate OFF → mode reverted to Smart, "
@@ -1099,6 +1099,37 @@ def on_preclimate_changed(value=None, old_value=None, **kwargs):
         )
         task.sleep(1)
         pyscript.ev_control_loop()
+
+
+@time_trigger("period(now, 2min)")
+def preclimate_poll(**kwargs):
+    """
+    Polling backup for the preclimate state trigger.
+
+    @state_trigger does not fire retroactively when pyscript loads while
+    the sensor is already 'on'. This poll catches that gap within 2 minutes.
+
+    Two catch-up cases:
+      - Preclimate active, flag not set → call on-path (missed activation).
+      - Preclimate inactive, flag still set → call off-path (missed deactivation).
+    """
+    preclimate_on = (state.get(PRECLIMATE_ENT) or "off") == "on"
+    flag_on       = (state.get(PRECLIMATE_FLAG_ENT) or "off") == "on"
+    current_mode  = state.get(MODE_ENT) or "Smart"
+
+    if preclimate_on and not flag_on and current_mode != "Stop":
+        log.info(
+            "ev_control_loop: preclimate_poll: preclimate active but flag not set "
+            "— catching up (missed state-change trigger)"
+        )
+        on_preclimate_changed(value="on", old_value="off")
+
+    elif not preclimate_on and flag_on:
+        log.info(
+            "ev_control_loop: preclimate_poll: preclimate inactive but flag set "
+            "— catching up (missed state-change trigger)"
+        )
+        on_preclimate_changed(value="off", old_value="on")
 
 
 # ── Consumption guard hourly reset ────────────────────────────────────────────
