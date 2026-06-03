@@ -21,7 +21,6 @@ input_number:
     min: 1
     max: 20
     step: 0.5
-    initial: 5.0
     unit_of_measurement: kWh
     icon: mdi:gauge
   ev_max_tariff_power_kw:
@@ -29,7 +28,6 @@ input_number:
     min: 0
     max: 11
     step: 0.5
-    initial: 0
     unit_of_measurement: kW
     icon: mdi:current-ac
   ev_max_price_sek:
@@ -37,18 +35,15 @@ input_number:
     min: 0
     max: 5
     step: 0.1
-    initial: 0
     unit_of_measurement: "SEK/kWh"
     icon: mdi:currency-usd-off
 
 input_boolean:
   ev_tariff_guard_enabled:
     name: "EV power tariff guard"
-    initial: true
     icon: mdi:shield-bolt
   ev_auto_deadline:
     name: "EV auto deadline from weekly schedule"
-    initial: true
     icon: mdi:calendar-sync
   ev_consumption_guard_active:
     name: "EV consumption guard cooldown"
@@ -77,7 +72,7 @@ template:
         icon: mdi:lightning-bolt
         state: >
           {%- set power_w = states('sensor.laddbox_charge_power') | float(0) -%}
-          {%- if power_w > 0 -%}
+          {%- if power_w >= 1000 -%}
             {{ (power_w / 1000) | round(3) }}
           {%- else -%}
             7
@@ -195,7 +190,7 @@ template:
           {%- set any_deadline = auto_deadline_set or man_deadline_set -%}
           {{ any_deadline
              and slots_needed > 0
-             and slots_available <= (slots_needed + 1) }}
+             and slots_available <= slots_needed }}
 
 # ── Safety Automations ─────────────────────────────────────────────────────────
 # These run independently of the pyscript control loop as a hard-stop backstop.
