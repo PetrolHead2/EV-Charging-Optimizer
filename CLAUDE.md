@@ -346,3 +346,65 @@ Installed path on debian:
 - energy_import_total: CORRECT (conversion factor verified)
 - All 4 Zaptec reporter sensors: CORRECT
 - signal_strength (RSSI): CORRECT — live at −60 dBm
+
+---
+
+## Water Heater Tracker
+
+Pattern-based hot water heater detection and cost
+tracking using Perific L1/L3 current sensors.
+
+Source file: /config/packages/water_heater_tracker.yaml
+
+### How detection works
+
+The water heater is a 2-phase resistive load on L1 and
+L3 only. L2 draws zero current when the heater is active.
+This gives a clean, noise-free signal with zero overlap
+with the EV charger (which draws high current on L1 only,
+leaving L3 at baseline).
+
+Detection rule:
+  sensor.perific_measurement_current_l1 > 5.0 A
+  AND
+  sensor.perific_measurement_current_l3 > 5.0 A simultaneously
+
+Confirmed characteristics (from 48h analysis, 453 events):
+  L1 baseline:        0.6 A
+  L3 baseline:        0.6 A
+  L1 when heating:    ~7.2 A (delta +6.6 A)
+  L3 when heating:    ~7.5 A (delta +6.9 A)
+  Estimated power:    ~3,105 W  (delta_L1 + delta_L3) × 230V
+  Topology:           2-phase (L1 + L3), L2 = 0
+  EV charger overlap: None — EV is L1-only at 16–22 A,
+                      L3 stays at baseline during charging
+  Detection confidence: HIGH
+
+### Sensors produced
+
+| Entity ID | Description |
+|---|---|
+| binary_sensor.water_heater_active | ON when heater drawing current (60s delay_on / 30s delay_off) |
+| sensor.water_heater_power | Instantaneous power (W): (iavg_l1 - 0.6 + iavg_l3 - 0.6) × 230 |
+| sensor.water_heater_energy | Cumulative energy (kWh, total_increasing) |
+| sensor.daily_water_heater_energy | kWh today (resets midnight) |
+| sensor.monthly_water_heater_energy | kWh this month (resets 1st) |
+
+### Power formula
+
+  power = (current_l1 - baseline_l1 + current_l3 - baseline_l3) × 230
+        = (iavg_l1 - 0.6 + iavg_l3 - 0.6) × 230
+
+Note: NO L2 multiplier. Heater is confirmed 2-phase only.
+A ×1.5 scaling factor was removed after live verification
+confirmed L2 = 0A during heater operation.
+
+### Known limitations
+
+- Heating cycles shorter than 60 seconds are not captured
+  (delay_on filter). Negligible energy impact.
+- Power is estimated using 230V nominal. Actual power
+  will vary slightly with grid voltage.
+- If baseline household load on L1 or L3 increases
+  significantly (new appliance), the 5.0A threshold
+  and 0.6A baseline values may need recalibration.
