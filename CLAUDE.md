@@ -361,8 +361,8 @@ Source file: /config/packages/water_heater_tracker.yaml
 The water heater is a 2-phase resistive load on L1 and
 L3 only. L2 draws zero current when the heater is active.
 This gives a clean, noise-free signal with zero overlap
-with the EV charger (which draws high current on L1 only,
-leaving L3 at baseline).
+with the EV charger (which draws high current on L1 and L2
+at 400 V line-to-line, leaving L3 at baseline).
 
 Detection rule:
   sensor.perific_measurement_current_l1 > 5.0 A
@@ -376,8 +376,8 @@ Confirmed characteristics (from 48h analysis, 453 events):
   L3 when heating:    ~7.5 A (delta +6.9 A)
   Estimated power:    ~3,105 W  (delta_L1 + delta_L3) × 230V
   Topology:           2-phase (L1 + L3), L2 = 0
-  EV charger overlap: None — EV is L1-only at 16–22 A,
-                      L3 stays at baseline during charging
+  EV charger overlap: None — EV draws ~16 A on L1+L2 (400 V
+                      line-to-line), L3 stays at baseline
   Detection confidence: HIGH
 
 ### Sensors produced
@@ -389,6 +389,22 @@ Confirmed characteristics (from 48h analysis, 453 events):
 | sensor.water_heater_energy | Cumulative energy (kWh, total_increasing) |
 | sensor.daily_water_heater_energy | kWh today (resets midnight) |
 | sensor.monthly_water_heater_energy | kWh this month (resets 1st) |
+| sensor.daily_water_heater_cost | SEK today (resets midnight) |
+| sensor.monthly_water_heater_cost | SEK this month (resets 1st) |
+
+### Cost tracking
+
+Cost sensors are produced by the `energy_meter` custom component
+(`zeronounours/HA-custom-component-energy-meter`), following the
+same pattern as the existing stickpropp_10 tracker.
+
+Price entity: `sensor.totalpriceperkwh` (all-in SEK/kWh)
+
+The `energy_meter:` block in water_heater_tracker.yaml creates
+`sensor.daily_water_heater` and `sensor.monthly_water_heater`
+(kWh counters) alongside the cost sensors. These are separate from
+the `utility_meter`-backed `sensor.daily_water_heater_energy` and
+`sensor.monthly_water_heater_energy` but track the same source.
 
 ### Power formula
 
