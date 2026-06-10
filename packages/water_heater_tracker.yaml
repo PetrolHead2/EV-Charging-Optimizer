@@ -1,0 +1,49 @@
+template:
+  - binary_sensor:
+      - name: "Water Heater Active"
+        unique_id: water_heater_active
+        device_class: running
+        delay_on:
+          seconds: 60
+        delay_off:
+          seconds: 30
+        state: >
+          {{ states('sensor.perific_measurement_current_l1') | float(0) > 5.0
+             and
+             states('sensor.perific_measurement_current_l3') | float(0) > 5.0 }}
+
+  - sensor:
+      - name: "Water Heater Power"
+        unique_id: water_heater_power
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        icon: mdi:water-boiler
+        state: >
+          {% set l1 = states('sensor.perific_measurement_current_l1') | float(0) %}
+          {% set l3 = states('sensor.perific_measurement_current_l3') | float(0) %}
+          {% if is_state('binary_sensor.water_heater_active', 'on') %}
+            {{ (([l1 - 0.6, 0] | max + [l3 - 0.6, 0] | max) * 230 * 1.5) | round(0) | int }}
+          {% else %}
+            0
+          {% endif %}
+
+sensor:
+  - platform: integration
+    unique_id: water_heater_energy_integration
+    source: sensor.water_heater_power
+    name: water_heater_energy
+    unit_prefix: k
+    round: 3
+
+utility_meter:
+  daily_water_heater_energy:
+    unique_id: water_heater_energy_daily
+    source: sensor.water_heater_energy
+    name: Daily Water Heater Energy
+    cycle: daily
+  monthly_water_heater_energy:
+    unique_id: water_heater_energy_monthly
+    source: sensor.water_heater_energy
+    name: Monthly Water Heater Energy
+    cycle: monthly
