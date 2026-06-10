@@ -19,11 +19,15 @@ template:
         device_class: power
         state_class: measurement
         icon: mdi:water-boiler
+        # 2-phase resistive heater — L1 and L3 only.
+        # L2 confirmed zero during heater operation.
+        # Power = (iavg_l1 - baseline_l1 +
+        #          iavg_l3 - baseline_l3) × 230V
         state: >
           {% set l1 = states('sensor.perific_measurement_current_l1') | float(0) %}
           {% set l3 = states('sensor.perific_measurement_current_l3') | float(0) %}
           {% if is_state('binary_sensor.water_heater_active', 'on') %}
-            {{ (([l1 - 0.6, 0] | max + [l3 - 0.6, 0] | max) * 230 * 1.5) | round(0) | int }}
+            {{ (([l1 - 0.6, 0] | max + [l3 - 0.6, 0] | max) * 230) | round(0) | int }}
           {% else %}
             0
           {% endif %}
